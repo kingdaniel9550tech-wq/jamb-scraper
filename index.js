@@ -20,12 +20,29 @@ app.post('/check-jamb', async (req, res) => {
         chromium.setHeadlessMode = true;
         chromium.setGraphicsMode = false;
 
-        browser = await puppeteer.launch({
-            args: chromium.args,
-            defaultViewport: chromium.defaultViewport,
-            executablePath: await chromium.executablePath(),
-            headless: chromium.headless,
-        });
+        const executablePath = await chromium.executablePath();
+
+        // Retry wrapper to handle Render /tmp binary extraction race conditions (ETXTBSY)
+        let retries = 3;
+        while (retries > 0) {
+            try {
+                browser = await puppeteer.launch({
+                    args: chromium.args,
+                    defaultViewport: chromium.defaultViewport,
+                    executablePath: executablePath,
+                    headless: chromium.headless,
+                });
+                break;
+            } catch (launchErr) {
+                retries--;
+                if (launchErr.code === 'ETXTBSY' && retries > 0) {
+                    console.log(`Browser binary busy (ETXTBSY). Retrying in 1.5s... (${retries} attempts left)`);
+                    await new Promise(r => setTimeout(r, 1500));
+                } else {
+                    throw launchErr;
+                }
+            }
+        }
 
         const page = await browser.newPage();
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
@@ -83,11 +100,10 @@ app.post('/check-jamb', async (req, res) => {
             };
         });
 
-        // 3. Precisely click into CAPS / Check Admission Status tile
+        // 3. Click into CAPS / Check Admission Status tile
         try {
             const clicked = await page.evaluate(() => {
                 const clickableElements = Array.from(document.querySelectorAll('a, button, div, span, h4, p'));
-                // Look specifically for admission status triggers
                 const target = clickableElements.find(el => {
                     const t = el.innerText.toLowerCase();
                     return t.includes('admission status') || t.includes('check admission');
@@ -101,13 +117,13 @@ app.post('/check-jamb', async (req, res) => {
 
             if (clicked) {
                 await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).catch(() => {});
-                await new Promise(r => setTimeout(r, 7000)); // Give extra time for CAPS portal to render tables
+                await new Promise(r => setTimeout(r, 7000));
             }
         } catch (e) {
             console.log("CAPS navigation click notice:", e.message);
         }
 
-        // 4. Extract Institution & Course strictly from the CAPS admission page layout
+        // 4. Extract Institution & Course from CAPS admission page
         const capsData = await page.evaluate(() => {
             const bodyText = document.body.innerText || "";
             const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
@@ -116,13 +132,11 @@ app.post('/check-jamb', async (req, res) => {
             let course = null;
             let admissionStatus = null;
 
-            // Blacklist service form headers so they never leak into school/course slots
             const ignoreList = ["application for", "correction", "condonement", "change of", "downward"];
 
             for (let i = 0; i < lines.length; i++) {
                 const cur = lines[i].toLowerCase();
 
-                // Match Institution label
                 if ((cur.includes('institution:') || cur === 'institution') && lines[i+1]) {
                     const val = lines[i+1];
                     if (!ignoreList.some(ig => val.toLowerCase().includes(ig))) {
@@ -130,7 +144,6 @@ app.post('/check-jamb', async (req, res) => {
                     }
                 }
 
-                // Match Course / Programme label
                 if ((cur.includes('course') || cur.includes('programme')) && lines[i+1] && !cur.includes('subject')) {
                     const val = lines[i+1];
                     if (!ignoreList.some(ig => val.toLowerCase().includes(ig))) {
@@ -138,7 +151,6 @@ app.post('/check-jamb', async (req, res) => {
                     }
                 }
 
-                // Match Admission Status label
                 if (cur.includes('admission status') && lines[i+1]) {
                     admissionStatus = lines[i+1];
                 }
