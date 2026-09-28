@@ -30,7 +30,7 @@ app.post('/check-jamb', async (req, res) => {
         const page = await browser.newPage();
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
 
-        // 1. Navigate to JAMB portal and login
+        // 1. Navigate to JAMB portal
         await page.goto('https://efacility.jamb.gov.ng/', { waitUntil: 'networkidle2', timeout: 45000 });
 
         const emailSelector = 'input#Email, input#email, input[name="Email"], input[name="email"]';
@@ -50,32 +50,39 @@ app.post('/check-jamb', async (req, res) => {
             page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {})
         ]);
 
-        const currentUrl = page.url();
-        if (currentUrl.includes('login') || currentUrl.includes('error') || currentUrl.includes('account/login')) {
+        // 2. Strict Check: If the password field or login buttons are still on screen, login failed!
+        const isStillOnLogin = await page.$(passwordSelector);
+        if (isStillOnLogin) {
             await browser.close();
-            return res.json({ success: false, message: "Authentication Failed. Please check your credentials." });
+            return res.json({ success: false, message: "Invalid Email or Password. Please check your credentials and try again." });
         }
 
-        // 2. Navigate to Candidate Dashboard / CAPS
+        // 3. Navigate to Candidate Dashboard / CAPS
         await page.goto('https://efacility.jamb.gov.ng/Candidate', { waitUntil: 'networkidle2', timeout: 30000 });
         await new Promise(r => setTimeout(r, 4000));
 
-        // 3. Extract candidate details and status from page content
+        const pageText = await page.evaluate(() => document.body.innerText);
+
+        // Double check if we got kicked back out to login
+        if (pageText.includes("Sign In") || pageText.includes("Invalid credentials")) {
+            await browser.close();
+            return res.json({ success: false, message: "Authentication Failed. Could not access candidate profile." });
+        }
+
+        // 4. Extract real candidate details
         const candidateData = await page.evaluate(() => {
-            const pageText = document.body.innerText;
-            
-            // Helper function to extract fields using regex search on page text
+            const text = document.body.innerText;
             const extract = (regex) => {
-                const match = pageText.match(regex);
-                return match ? match[1].trim() : "Not Available";
+                const match = text.match(regex);
+                return match ? match[1].trim() : null;
             };
 
             return {
-                name: extract(/(?:Welcome|Candidate Name)[:\s]*([A-Z\s]+)(?:\n|$)/i) || "Valued Candidate",
-                regNo: extract(/([0-9]{9}[A-Z]{2})/i) || extract(/Reg(?:istration)?\s*(?:No|Number)[:\s]*([A-Z0-9\/]+)/i) || "N/A",
-                institution: extract(/Institution[:\s]*([A-Za-z\s()]+)(?:\n|$)/i) || "Check Portal",
-                course: extract(/(?:Course|Programme|Department)[:\s]*([A-Za-z\s()\/]+)(?:\n|$)/i) || "Check Portal",
-                status: pageText.includes("Admitted") ? "🎉 ADMISSION OFFERED / APPROVED" : "⏳ Admission in Progress / Not Admitted Yet"
+                name: extract(/(?:Welcome|Candidate Name)[:\s]*([A-Z\s]+)(?:\n|$)/i) || "Candidate",
+                regNo: extract(/([0-9]{9}[A-Z]{2})/i) || extract(/Reg(?:istration)?\s*(?:No|Number)[:\s]*([A-Z0-9\/]+)/i) || "Not Found",
+                institution: extract(/Institution[:\s]*([A-Za-z\s()]+)(?:\n|$)/i) || "Not Specified",
+                course: extract(/(?:Course|Programme|Department)[:\s]*([A-Za-z\s()\/]+)(?:\n|$)/i) || "Not Specified",
+                status: text.includes("Admitted") ? "🎉 ADMISSION OFFERED / APPROVED" : "⏳ Admission in Progress / Not Admitted Yet"
             };
         });
 
