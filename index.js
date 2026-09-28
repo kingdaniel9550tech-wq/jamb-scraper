@@ -1,5 +1,6 @@
 const express = require('express');
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-core');
+const chromium = require('@sparticuz/chromium');
 
 const app = express();
 app.use(express.json());
@@ -16,29 +17,21 @@ app.post('/check-jamb', async (req, res) => {
 
     let browser;
     try {
-        // Low-memory flags optimized for Render free tier
+        // Optimize Chromium settings for cloud server environment
+        chromium.setHeadlessMode = true;
+        chromium.setGraphicsMode = false;
+
         browser = await puppeteer.launch({
-            headless: true,
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-gpu',
-                '--no-zygote',
-                '--single-process',
-                '--disable-accelerated-2d-canvas',
-                '--disable-blink-features=AutomationControlled'
-            ]
+            args: chromium.args,
+            defaultViewport: chromium.defaultViewport,
+            executablePath: await chromium.executablePath(),
+            headless: chromium.headless,
         });
 
         const page = await browser.newPage();
-        await page.evaluateOnNewDocument(() => {
-            Object.defineProperty(navigator, 'webdriver', { get: () => false });
-        });
-
-        await page.setViewport({ width: 1366, height: 768 });
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
 
+        // 1. Navigate to JAMB portal
         await page.goto('https://efacility.jamb.gov.ng/', { waitUntil: 'networkidle2', timeout: 45000 });
 
         const emailSelector = 'input#Email, input#email, input[name="Email"], input[name="email"]';
@@ -64,6 +57,7 @@ app.post('/check-jamb', async (req, res) => {
             return res.json({ success: false, message: "Authentication Failed. Please check your credentials." });
         }
 
+        // 2. Navigate to Candidate Dashboard
         await page.goto('https://efacility.jamb.gov.ng/Candidate', { waitUntil: 'networkidle2', timeout: 30000 });
         await new Promise(r => setTimeout(r, 4000));
 
@@ -75,7 +69,7 @@ app.post('/check-jamb', async (req, res) => {
 
     } catch (error) {
         if (browser) await browser.close();
-        console.error("Render Scraper Crash Error:", error);
+        console.error("Cloud Scraper Error:", error);
         return res.status(500).json({ success: false, message: error.message });
     }
 });
