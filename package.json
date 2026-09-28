@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "postinstall": "rm -rf /opt/render/.cache/puppeteer && npx puppeteer browsers install chrome"
+    "postinstall": "rm -rf /opt/render/.cache/puppeteer && ./node_modules/.bin/puppeteer browsers install chrome"
   },
   "dependencies": {
     "express": "^4.19.2",
