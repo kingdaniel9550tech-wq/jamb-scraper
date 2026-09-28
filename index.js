@@ -4,6 +4,11 @@ const puppeteer = require('puppeteer');
 const app = express();
 app.use(express.json());
 
+// 1. ADD THIS: A simple GET route so you can open your URL in a mobile browser to test if it's online!
+app.get('/', (req, res) => {
+    res.send('👑 JAMB Scraper API is active and online!');
+});
+
 app.post('/check-jamb', async (req, res) => {
     const { email, password } = req.body;
     if (!email || !password) {
@@ -31,7 +36,6 @@ app.post('/check-jamb', async (req, res) => {
         await page.setViewport({ width: 1366, height: 768 });
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
 
-        // 1. Navigate to JAMB portal
         await page.goto('https://efacility.jamb.gov.ng/', { waitUntil: 'networkidle2', timeout: 45000 });
 
         const emailSelector = 'input#Email, input#email, input[name="Email"], input[name="email"]';
@@ -57,7 +61,6 @@ app.post('/check-jamb', async (req, res) => {
             return res.json({ success: false, message: "Authentication Failed. Please check your credentials." });
         }
 
-        // 2. Navigate to Candidate Dashboard
         await page.goto('https://efacility.jamb.gov.ng/Candidate', { waitUntil: 'networkidle2', timeout: 30000 });
         await new Promise(r => setTimeout(r, 4000));
 
@@ -75,6 +78,4 @@ app.post('/check-jamb', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`Scraper API running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Scraper API running on port ${PORT}`));
