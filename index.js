@@ -99,45 +99,41 @@ app.post('/check-jamb', async (req, res) => {
             };
         });
 
-        // 3. Click CAPS button and capture the NEW TAB / POPUP window
-        let targetPage = page;
+        // 3. Click the Admission Status / CAPS card
         try {
-            const newPagePromise = new Promise(resolve => {
-                browser.once('targetcreated', async target => {
-                    const newPage = await target.page();
-                    resolve(newPage);
-                });
-            });
-
-            // Trigger the click that opens the popup tab
             await page.evaluate(() => {
                 const elements = Array.from(document.querySelectorAll('a, button, div, span, h4, p'));
                 const target = elements.find(el => {
                     const t = el.innerText.toLowerCase();
                     return t.includes('admission status') || t.includes('caps') || t.includes('check admission');
                 });
-                if (target) {
-                    target.click();
-                }
+                if (target) target.click();
             });
-
-            // Wait up to 8 seconds for the new tab to appear
-            const popupPage = await Promise.race([
-                newPagePromise,
-                new Promise(resolve => setTimeout(() => resolve(null), 8000))
-            ]);
-
-            if (popupPage) {
-                targetPage = popupPage;
-                await targetPage.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).catch(() => {});
-                await new Promise(r => setTimeout(r, 6000)); // Let the portal load fully
-            }
         } catch (e) {
-            console.log("Popup tab navigation notice:", e.message);
+            console.log("CAPS click notice:", e.message);
         }
 
-        // 4. Extract Institution, Course, and Status from the active page (the CAPS popup)
-        const capsData = await targetPage.evaluate(() => {
+        // 4. Dynamic Polling: Wait and check every 3s (up to 5 attempts = 15s max) until CAPS data appears
+        let capsLoaded = false;
+        for (let attempt = 1; attempt <= 5; attempt++) {
+            await new Promise(r => setTimeout(r, 3000)); // wait 3 seconds per check
+            
+            const checkData = await page.evaluate(() => {
+                const bodyText = document.body.innerText || "";
+                return {
+                    hasLoaded: bodyText.includes("Institution:") || bodyText.includes("Institution") || bodyText.includes("UTME / DE ADMISSION"),
+                    fullText: bodyText
+                };
+            });
+
+            if (checkData.hasLoaded) {
+                capsLoaded = true;
+                break;
+            }
+        }
+
+        // 5. Extract Institution & Course from the page once loaded
+        const finalCapsData = await page.evaluate(() => {
             const bodyText = document.body.innerText || "";
             const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
 
@@ -176,12 +172,12 @@ app.post('/check-jamb', async (req, res) => {
             };
         });
 
-        if (capsData.institution) candidateData.institution = capsData.institution;
-        if (capsData.course) candidateData.course = capsData.course;
+        if (finalCapsData.institution) candidateData.institution = finalCapsData.institution;
+        if (finalCapsData.course) candidateData.course = finalCapsData.course;
         
-        if (capsData.statusText.toUpperCase().includes("ADMITTED") && !capsData.statusText.toUpperCase().includes("NOT")) {
+        if (finalCapsData.statusText.toUpperCase().includes("ADMITTED") && !finalCapsData.statusText.toUpperCase().includes("NOT")) {
             candidateData.status = "🎉 ADMISSION OFFERED / APPROVED";
-        } else if (capsData.statusText.toUpperCase().includes("NOT ADMITTED")) {
+        } else if (finalCapsData.statusText.toUpperCase().includes("NOT")) {
             candidateData.status = "❌ NOT ADMITTED YET";
         }
 
