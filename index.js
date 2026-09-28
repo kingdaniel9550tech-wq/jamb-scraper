@@ -30,11 +30,11 @@ app.post('/check-jamb', async (req, res) => {
         const page = await browser.newPage();
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
 
-        // 1. Navigate to JAMB portal login
+        // 1. Navigate & Login to JAMB e-facility
         await page.goto('https://efacility.jamb.gov.ng/', { waitUntil: 'networkidle2', timeout: 45000 });
 
-        const emailSelector = 'input#Email, input#email, input[name="Email'], input[name="email"]';
-        const passwordSelector = 'input#Password, input#password, input[name="Password'], input[name="password"]';
+        const emailSelector = 'input#Email, input#email, input[name="Email"], input[name="email"]';
+        const passwordSelector = 'input#Password, input#password, input[name="Password"], input[name="password"]';
 
         await page.waitForSelector(emailSelector, { timeout: 15000 });
         await page.type(emailSelector, email, { delay: 30 });
@@ -50,69 +50,110 @@ app.post('/check-jamb', async (req, res) => {
             page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {})
         ]);
 
-        // 2. Validate Login Success
         const isStillOnLogin = await page.$(passwordSelector);
         if (isStillOnLogin) {
             await browser.close();
             return res.json({ success: false, message: "Invalid Email or Password. Please check your credentials." });
         }
 
-        // 3. Extract Name & Profile Code from Main Dashboard
         await new Promise(r => setTimeout(r, 4000));
-        let dashboardText = await page.evaluate(() => document.body.innerText || "");
 
-        // 4. Navigate directly to CAPS portal URL using the active session cookies
+        // 2. Extract Candidate Name and Profile Code from Main Dashboard
+        let candidateData = await page.evaluate(() => {
+            const bodyText = document.body.innerText || "";
+            
+            // Extract Name from "Welcome Back [Name]..."
+            let name = "Verified Candidate";
+            const nameMatch = bodyText.match(/Welcome\s*Back\s*([^\r\n.]+)/i);
+            if (nameMatch) {
+                name = nameMatch[1].replace(/[.!]/g, '').trim();
+            }
+
+            // Extract Profile Code
+            let profileCode = "Not Found";
+            const pcMatch = bodyText.match(/Profile\s*Code[:\s]*([0-9]+)/i) || bodyText.match(/\b([0-9][A-Z0-9]{9})\b/);
+            if (pcMatch) {
+                profileCode = pcMatch[1];
+            }
+
+            return { 
+                name, 
+                profileCode, 
+                institution: "Not Yet Loaded in CAPS", 
+                course: "Not Yet Loaded in CAPS", 
+                status: "⏳ Admission in Progress / Not Admitted Yet" 
+            };
+        });
+
+        // 3. Click into CAPS / Admission Status to load Institution and Course
         try {
-            await page.goto('https://caps.jamb.gov.ng/', { waitUntil: 'networkidle2', timeout: 25000 });
-            await new Promise(r => setTimeout(r, 5000));
-            const capsText = await page.evaluate(() => document.body.innerText || "");
-            dashboardText += "\n" + capsText;
+            const clicked = await page.evaluate(() => {
+                const elements = Array.from(document.querySelectorAll('a, button, div, span, h4, p'));
+                const target = elements.find(el => {
+                    const t = el.innerText.toLowerCase();
+                    return t.includes('admission status') || t.includes('caps') || t.includes('check admission');
+                });
+                if (target) {
+                    target.click();
+                    return true;
+                }
+                return false;
+            });
+
+            if (clicked) {
+                await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).catch(() => {});
+                await new Promise(r => setTimeout(r, 6000)); // Wait for CAPS page elements to render
+            }
         } catch (e) {
-            console.log("Direct CAPS navigation fallback used:", e.message);
+            console.log("CAPS navigation click notice:", e.message);
         }
 
-        // 5. Precise Regex Parsing for Koitilo & CAPS Details
-        const candidateData = await page.evaluate((fullText) => {
-            // Extract Profile Code (10 digits starting with numbers)
-            const pcMatch = fullText.match(/\b([0-9][A-Z0-9]{9})\b/);
-            const profileCode = pcMatch ? pcMatch[1] : "Available on Portal";
+        // 4. Extract Institution, Course, and Status from the CAPS portal view
+        const capsData = await page.evaluate(() => {
+            const bodyText = document.body.innerText || "";
+            const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
 
-            // Extract Name from "Welcome Back [Name]" pattern
-            let name = "Koitilo, Anthony Samuel"; // Default to verified value if regex misses
-            const nameMatch = fullText.match(/Welcome\s*Back\s*([A-Za-z,\s]+)(?:\.{3}|\n|$)/i);
-            if (nameMatch && nameMatch[1].trim().length > 3) {
-                name = nameMatch[1].replace(/\.{3}/g, '').trim();
+            let institution = null;
+            let course = null;
+            let admissionStatus = null;
+
+            for (let i = 0; i < lines.length; i++) {
+                const cur = lines[i].toLowerCase();
+
+                // Match Institution label
+                if ((cur.includes('institution:') || cur === 'institution') && lines[i+1]) {
+                    institution = lines[i+1];
+                }
+
+                // Match Course / Programme label
+                if ((cur.includes('course') || cur.includes('programme')) && lines[i+1] && !cur.includes('subject')) {
+                    course = lines[i+1];
+                }
+
+                // Match Admission Status label
+                if (cur.includes('admission status') && lines[i+1]) {
+                    admissionStatus = lines[i+1];
+                }
             }
-
-            // Extract Institution Choice
-            let institution = "Ekiti State University, Ado-Ekiti, Ekiti State";
-            const instMatch = fullText.match(/Institution[:\s]*([A-Za-z\s,\-\(\)]+?)(?=Course|UTME|Admission|$)/i);
-            if (instMatch && instMatch[1].trim().length > 5) {
-                institution = instMatch[1].replace(/Course.*/i, '').trim();
-            }
-
-            // Extract Course / Programme
-            let course = "Education & Economics";
-            const courseMatch = fullText.match(/Course[:\s]*([A-Za-z\s&\-\(\)]+?)(?=UTME|Admission|Subject|$)/i);
-            if (courseMatch && courseMatch[1].trim().length > 3) {
-                course = courseMatch[1].trim();
-            }
-
-            // Admission Status Check
-            const isAdmitted = fullText.includes("ADMITTED") && !fullText.includes("NOT ADMITTED");
-            const status = isAdmitted ? "🎉 ADMISSION OFFERED / APPROVED" : "⏳ Admission in Progress / Not Admitted Yet";
 
             return {
-                name: name,
-                profileCode: profileCode,
-                institution: institution,
-                course: course,
-                status: status
+                institution: institution || null,
+                course: course || null,
+                statusText: admissionStatus || (bodyText.includes("NOT ADMITTED") ? "NOT ADMITTED" : (bodyText.includes("ADMITTED") ? "ADMITTED" : ""))
             };
-        }, dashboardText);
+        });
+
+        if (capsData.institution) candidateData.institution = capsData.institution;
+        if (capsData.course) candidateData.course = capsData.course;
+        
+        if (capsData.statusText.toUpperCase().includes("ADMITTED") && !capsData.statusText.toUpperCase().includes("NOT")) {
+            candidateData.status = "🎉 ADMISSION OFFERED / APPROVED";
+        } else if (capsData.statusText.toUpperCase().includes("NOT ADMITTED")) {
+            candidateData.status = "❌ NOT ADMITTED YET";
+        }
 
         await browser.close();
-        return res.json({ success: true, data: candidateData, message: "Successfully fetched exact candidate details." });
+        return res.json({ success: true, data: candidateData, message: "Successfully fetched all details." });
 
     } catch (error) {
         if (browser) await browser.close();
