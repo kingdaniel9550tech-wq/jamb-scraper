@@ -57,26 +57,76 @@ app.post('/check-jamb', async (req, res) => {
             return res.json({ success: false, message: "Invalid Email or Password. Please check your credentials." });
         }
 
-        // 3. Wait for the post-login dashboard to fully render naturally
-        await new Promise(r => setTimeout(r, 6000));
+        // 3. Wait for dashboard to render
+        await new Promise(r => setTimeout(r, 4000));
 
-        // 4. Extract visible profile info from the main landing dashboard
-        const dashboardText = await page.evaluate(() => document.body.innerText || "");
+        // Try to click into "Check Admission Status" or CAPS if available to expose course/institution
+        try {
+            await page.evaluate(() => {
+                const links = Array.from(document.querySelectorAll('a, button, div, span'));
+                const target = links.find(el => {
+                    const t = el.innerText.toLowerCase();
+                    return t.includes('admission status') || t.includes('caps') || t.includes('check admission');
+                });
+                if (target) target.click();
+            });
+            await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 }).catch(() => {});
+            await new Promise(r => setTimeout(r, 4000));
+        } catch (e) {
+            console.log("Could not auto-click sub-menu, reading main dashboard...");
+        }
 
-        // Try to find candidate name & profile code from page text patterns
-        const profileCodeMatch = dashboardText.match(/\b([0-9][A-Z0-9]{9})\b/) || dashboardText.match(/(?:Profile\s*Code[:\s]*)([A-Z0-9]{10})/i);
-        const nameMatch = dashboardText.match(/(?:Welcome,?\s*([A-Za-z\s]+)(?:\n|$))/i);
+        // 4. Advanced Data Extraction
+        const candidateData = await page.evaluate(() => {
+            const bodyText = document.body.innerText || "";
+            const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
 
-        const candidateData = {
-            name: nameMatch ? nameMatch[1].trim() : "Verified Candidate",
-            profileCode: profileCodeMatch ? profileCodeMatch[1] : "Active on Portal",
-            institution: "Loaded on Portal",
-            course: "Loaded on Portal",
-            status: dashboardText.includes("Admitted") ? "🎉 ADMISSION OFFERED / APPROVED" : "⏳ Admission in Progress / Not Admitted Yet"
-        };
+            let profileCode = "Not Found";
+            let name = "Candidate";
+            let institution = "Not Specified";
+            let course = "Not Specified";
+
+            // Find Profile Code (10-character alphanumeric string)
+            const pcMatch = bodyText.match(/\b([0-9][A-Z0-9]{9})\b/);
+            if (pcMatch) profileCode = pcMatch[1];
+
+            // Scan lines for candidate attributes
+            for (let i = 0; i < lines.length; i++) {
+                const cur = lines[i].toLowerCase();
+
+                // Candidate Name detection
+                if ((cur.includes("welcome") || cur.includes("candidate:")) && lines[i+1] && lines[i+1].length > 3) {
+                    name = lines[i+1].replace(/[:]/g, '').trim();
+                }
+
+                // Institution detection
+                if ((cur.includes("institution") || cur.includes("university") || cur.includes("polytechnic")) && lines[i+1] && lines[i+1].length > 3) {
+                    institution = lines[i+1];
+                }
+
+                // Course / Programme detection
+                if ((cur.includes("programme") || cur.includes("course") || cur.includes("department")) && lines[i+1] && lines[i+1].length > 3) {
+                    course = lines[i+1];
+                }
+            }
+
+            // Fallback: search for an all-caps full name line if 'Welcome' scan missed it
+            if (name === "Candidate") {
+                const upperLine = lines.find(l => /^[A-Z]+\s+[A-Z]+(\s+[A-Z]+)?$/.test(l) && !l.includes("JAMB") && !l.includes("DASHBOARD") && !l.includes("PORTAL") && !l.includes("WELCOME"));
+                if (upperLine) name = upperLine;
+            }
+
+            return {
+                name: name,
+                profileCode: profileCode,
+                institution: institution,
+                course: course,
+                status: bodyText.includes("Admitted") ? "🎉 ADMISSION OFFERED / APPROVED" : "⏳ Admission in Progress / Not Admitted Yet"
+            };
+        });
 
         await browser.close();
-        return res.json({ success: true, data: candidateData, message: "Successfully fetched details." });
+        return res.json({ success: true, data: candidateData, message: "Successfully fetched all details." });
 
     } catch (error) {
         if (browser) await browser.close();
