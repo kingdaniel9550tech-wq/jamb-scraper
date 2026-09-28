@@ -30,7 +30,7 @@ app.post('/check-jamb', async (req, res) => {
         const page = await browser.newPage();
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
 
-        // 1. Navigate to JAMB e-facility portal login
+        // 1. Navigate to JAMB portal login
         await page.goto('https://efacility.jamb.gov.ng/', { waitUntil: 'networkidle2', timeout: 45000 });
 
         const emailSelector = 'input#Email, input#email, input[name="Email"], input[name="email"]';
@@ -57,63 +57,75 @@ app.post('/check-jamb', async (req, res) => {
             return res.json({ success: false, message: "Invalid Email or Password. Please check your credentials." });
         }
 
-        // 3. Wait for dashboard to render
+        // 3. Wait for dashboard and click "Check Admission Status" or "CAPS" tile
         await new Promise(r => setTimeout(r, 4000));
 
-        // Try to click into "Check Admission Status" or CAPS if available to expose course/institution
         try {
             await page.evaluate(() => {
-                const links = Array.from(document.querySelectorAll('a, button, div, span'));
-                const target = links.find(el => {
+                const elements = Array.from(document.querySelectorAll('a, button, div, span, h4'));
+                const target = elements.find(el => {
                     const t = el.innerText.toLowerCase();
                     return t.includes('admission status') || t.includes('caps') || t.includes('check admission');
                 });
                 if (target) target.click();
             });
-            await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 }).catch(() => {});
-            await new Promise(r => setTimeout(r, 4000));
+            await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 12000 }).catch(() => {});
+            await new Promise(r => setTimeout(r, 5000)); // Wait for CAPS page to load
         } catch (e) {
-            console.log("Could not auto-click sub-menu, reading main dashboard...");
+            console.log("Could not auto-click CAPS tile, parsing dashboard text...");
         }
 
-        // 4. Advanced Data Extraction
+        // 4. Clean Data Extractor with Blacklist Filtering
         const candidateData = await page.evaluate(() => {
             const bodyText = document.body.innerText || "";
             const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
 
             let profileCode = "Not Found";
-            let name = "Candidate";
-            let institution = "Not Specified";
-            let course = "Not Specified";
+            let name = "Verified Candidate";
+            let institution = "Not Yet Loaded in CAPS";
+            let course = "Not Yet Loaded in CAPS";
 
-            // Find Profile Code (10-character alphanumeric string)
+            // Blacklist keywords to ignore service buttons and footers
+            const ignoreList = [
+                "application for", "correction", "condonement", "enquiries", 
+                "support", "complaint", "jamb", "dashboard", "portal", "sign out", 
+                "profile", "password", "register", "payment", "history"
+            ];
+
+            const isValidText = (text) => {
+                if (!text || text.length < 3) return false;
+                const lower = text.toLowerCase();
+                return !ignoreList.some(ig => lower.includes(ig));
+            };
+
+            // Extract Profile Code (10 characters starting with a digit)
             const pcMatch = bodyText.match(/\b([0-9][A-Z0-9]{9})\b/);
             if (pcMatch) profileCode = pcMatch[1];
 
-            // Scan lines for candidate attributes
+            // Scan lines for valid candidate info
             for (let i = 0; i < lines.length; i++) {
                 const cur = lines[i].toLowerCase();
 
-                // Candidate Name detection
-                if ((cur.includes("welcome") || cur.includes("candidate:")) && lines[i+1] && lines[i+1].length > 3) {
+                // Name extraction
+                if ((cur.includes("welcome") || cur.includes("candidate:")) && lines[i+1] && isValidText(lines[i+1])) {
                     name = lines[i+1].replace(/[:]/g, '').trim();
                 }
 
-                // Institution detection
-                if ((cur.includes("institution") || cur.includes("university") || cur.includes("polytechnic")) && lines[i+1] && lines[i+1].length > 3) {
-                    institution = lines[i+1];
+                // Institution extraction (looking for university/polytechnic/college names)
+                if ((cur.includes("institution") || cur.includes("university") || cur.includes("polytechnic") || cur.includes("college")) && lines[i+1]) {
+                    if (isValidText(lines[i+1])) institution = lines[i+1];
                 }
 
-                // Course / Programme detection
-                if ((cur.includes("programme") || cur.includes("course") || cur.includes("department")) && lines[i+1] && lines[i+1].length > 3) {
-                    course = lines[i+1];
+                // Course / Programme extraction
+                if ((cur.includes("programme") || cur.includes("course") || cur.includes("department")) && lines[i+1]) {
+                    if (isValidText(lines[i+1])) course = lines[i+1];
                 }
             }
 
-            // Fallback: search for an all-caps full name line if 'Welcome' scan missed it
-            if (name === "Candidate") {
-                const upperLine = lines.find(l => /^[A-Z]+\s+[A-Z]+(\s+[A-Z]+)?$/.test(l) && !l.includes("JAMB") && !l.includes("DASHBOARD") && !l.includes("PORTAL") && !l.includes("WELCOME"));
-                if (upperLine) name = upperLine;
+            // Fallback for name if welcome tag wasn't caught
+            if (name === "Verified Candidate") {
+                const possibleName = lines.find(l => /^[A-Z]+\s+[A-Z]+(\s+[A-Z]+)?$/.test(l) && isValidText(l));
+                if (possibleName) name = possibleName;
             }
 
             return {
@@ -126,7 +138,7 @@ app.post('/check-jamb', async (req, res) => {
         });
 
         await browser.close();
-        return res.json({ success: true, data: candidateData, message: "Successfully fetched all details." });
+        return res.json({ success: true, data: candidateData, message: "Successfully fetched clean details." });
 
     } catch (error) {
         if (browser) await browser.close();
