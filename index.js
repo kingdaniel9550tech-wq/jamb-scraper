@@ -4,7 +4,6 @@ const puppeteer = require('puppeteer');
 const app = express();
 app.use(express.json());
 
-// 1. ADD THIS: A simple GET route so you can open your URL in a mobile browser to test if it's online!
 app.get('/', (req, res) => {
     res.send('👑 JAMB Scraper API is active and online!');
 });
@@ -17,6 +16,7 @@ app.post('/check-jamb', async (req, res) => {
 
     let browser;
     try {
+        // Low-memory flags optimized for Render free tier
         browser = await puppeteer.launch({
             headless: true,
             args: [
@@ -24,6 +24,9 @@ app.post('/check-jamb', async (req, res) => {
                 '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',
                 '--disable-gpu',
+                '--no-zygote',
+                '--single-process',
+                '--disable-accelerated-2d-canvas',
                 '--disable-blink-features=AutomationControlled'
             ]
         });
@@ -72,7 +75,7 @@ app.post('/check-jamb', async (req, res) => {
 
     } catch (error) {
         if (browser) await browser.close();
-        console.error("Scraper Error:", error);
+        console.error("Render Scraper Crash Error:", error);
         return res.status(500).json({ success: false, message: error.message });
     }
 });
