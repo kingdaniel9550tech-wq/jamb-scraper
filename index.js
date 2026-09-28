@@ -72,7 +72,7 @@ app.post('/check-jamb', async (req, res) => {
             return res.json({ success: false, message: "Invalid Email or Password. Please check your credentials." });
         }
 
-        await new Promise(r => setTimeout(r, 3000));
+        await new Promise(r => setTimeout(r, 4000));
 
         // 2. Extract Candidate Name and Profile Code from Dashboard
         let candidateData = await page.evaluate(() => {
@@ -99,40 +99,43 @@ app.post('/check-jamb', async (req, res) => {
             };
         });
 
-        // 3. Directly navigate to CAPS candidate admission page
+        // 3. Step 1: Click "Check Admission Status"
         try {
-            await page.goto('https://caps.jamb.gov.ng/login/app_candidates/candidateadmission.aspx', { 
-                waitUntil: 'networkidle2', 
-                timeout: 35000 
+            await page.evaluate(() => {
+                const elements = Array.from(document.querySelectorAll('a, button, div, span, h4, p'));
+                const target = elements.find(el => el.innerText.trim().toLowerCase().includes('check admission status'));
+                if (target) target.click();
             });
             await new Promise(r => setTimeout(r, 4000));
-
-            // Auto-select the exam year dropdown if present on the page
-            await page.evaluate(() => {
-                const selects = Array.from(document.querySelectorAll('select'));
-                for (const sel of selects) {
-                    // Look for options containing years like 2025, 2026, etc.
-                    const options = Array.from(sel.options);
-                    const validOption = options.find(opt => opt.text.includes('2025') || opt.text.includes('2026') || opt.text.includes('2024'));
-                    if (validOption) {
-                        sel.value = validOption.value;
-                        sel.dispatchEvent(new Event('change', { bubbles: true }));
-                        break;
-                    } else if (options.length > 1) {
-                        // Default to the first actual selection if specific year text isn't matched
-                        sel.selectedIndex = options.length - 1;
-                        sel.dispatchEvent(new Event('change', { bubbles: true }));
-                        break;
-                    }
-                }
-            });
-
-            await new Promise(r => setTimeout(r, 6000)); // Wait for table rows to load after year selection
-        } catch (navErr) {
-            console.log("Direct CAPS page action notice:", navErr.message);
+        } catch (e) {
+            console.log("Error clicking Check Admission Status:", e.message);
         }
 
-        // 4. Extract Institution, Course, and Status from the target page
+        // 4. Step 2: Click "Access My CAPS"
+        try {
+            await page.evaluate(() => {
+                const elements = Array.from(document.querySelectorAll('a, button, div, span, h4, p'));
+                const target = elements.find(el => el.innerText.trim().toLowerCase().includes('access my caps'));
+                if (target) target.click();
+            });
+            await new Promise(r => setTimeout(r, 4000));
+        } catch (e) {
+            console.log("Error clicking Access My CAPS:", e.message);
+        }
+
+        // 5. Step 3: Click "Regular Admission Status"
+        try {
+            await page.evaluate(() => {
+                const elements = Array.from(document.querySelectorAll('a, button, div, span, h4, p'));
+                const target = elements.find(el => el.innerText.trim().toLowerCase().includes('regular admission status'));
+                if (target) target.click();
+            });
+            await new Promise(r => setTimeout(r, 6000)); // Wait for table rows to load completely
+        } catch (e) {
+            console.log("Error clicking Regular Admission Status:", e.message);
+        }
+
+        // 6. Extract Institution, Course, and Status from the final page view
         const capsData = await page.evaluate(() => {
             const bodyText = document.body.innerText || "";
             const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
