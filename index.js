@@ -62,14 +62,12 @@ app.post('/check-jamb', async (req, res) => {
         let candidateData = await page.evaluate(() => {
             const bodyText = document.body.innerText || "";
             
-            // Extract Name from "Welcome Back [Name]..."
             let name = "Verified Candidate";
             const nameMatch = bodyText.match(/Welcome\s*Back\s*([^\r\n.]+)/i);
             if (nameMatch) {
                 name = nameMatch[1].replace(/[.!]/g, '').trim();
             }
 
-            // Extract Profile Code
             let profileCode = "Not Found";
             const pcMatch = bodyText.match(/Profile\s*Code[:\s]*([0-9]+)/i) || bodyText.match(/\b([0-9][A-Z0-9]{9})\b/);
             if (pcMatch) {
@@ -85,13 +83,14 @@ app.post('/check-jamb', async (req, res) => {
             };
         });
 
-        // 3. Click into CAPS / Admission Status to load Institution and Course
+        // 3. Precisely click into CAPS / Check Admission Status tile
         try {
             const clicked = await page.evaluate(() => {
-                const elements = Array.from(document.querySelectorAll('a, button, div, span, h4, p'));
-                const target = elements.find(el => {
+                const clickableElements = Array.from(document.querySelectorAll('a, button, div, span, h4, p'));
+                // Look specifically for admission status triggers
+                const target = clickableElements.find(el => {
                     const t = el.innerText.toLowerCase();
-                    return t.includes('admission status') || t.includes('caps') || t.includes('check admission');
+                    return t.includes('admission status') || t.includes('check admission');
                 });
                 if (target) {
                     target.click();
@@ -102,13 +101,13 @@ app.post('/check-jamb', async (req, res) => {
 
             if (clicked) {
                 await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).catch(() => {});
-                await new Promise(r => setTimeout(r, 6000)); // Wait for CAPS page elements to render
+                await new Promise(r => setTimeout(r, 7000)); // Give extra time for CAPS portal to render tables
             }
         } catch (e) {
             console.log("CAPS navigation click notice:", e.message);
         }
 
-        // 4. Extract Institution, Course, and Status from the CAPS portal view
+        // 4. Extract Institution & Course strictly from the CAPS admission page layout
         const capsData = await page.evaluate(() => {
             const bodyText = document.body.innerText || "";
             const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
@@ -117,17 +116,26 @@ app.post('/check-jamb', async (req, res) => {
             let course = null;
             let admissionStatus = null;
 
+            // Blacklist service form headers so they never leak into school/course slots
+            const ignoreList = ["application for", "correction", "condonement", "change of", "downward"];
+
             for (let i = 0; i < lines.length; i++) {
                 const cur = lines[i].toLowerCase();
 
                 // Match Institution label
                 if ((cur.includes('institution:') || cur === 'institution') && lines[i+1]) {
-                    institution = lines[i+1];
+                    const val = lines[i+1];
+                    if (!ignoreList.some(ig => val.toLowerCase().includes(ig))) {
+                        institution = val;
+                    }
                 }
 
                 // Match Course / Programme label
                 if ((cur.includes('course') || cur.includes('programme')) && lines[i+1] && !cur.includes('subject')) {
-                    course = lines[i+1];
+                    const val = lines[i+1];
+                    if (!ignoreList.some(ig => val.toLowerCase().includes(ig))) {
+                        course = val;
+                    }
                 }
 
                 // Match Admission Status label
