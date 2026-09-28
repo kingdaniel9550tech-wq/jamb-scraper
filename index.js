@@ -22,7 +22,6 @@ app.post('/check-jamb', async (req, res) => {
 
         const executablePath = await chromium.executablePath();
 
-        // Retry wrapper to handle Render /tmp binary extraction race conditions (ETXTBSY)
         let retries = 3;
         while (retries > 0) {
             try {
@@ -36,7 +35,7 @@ app.post('/check-jamb', async (req, res) => {
             } catch (launchErr) {
                 retries--;
                 if (launchErr.code === 'ETXTBSY' && retries > 0) {
-                    console.log(`Browser binary busy (ETXTBSY). Retrying in 1.5s... (${retries} attempts left)`);
+                    console.log(`Browser binary busy (ETXTBSY). Retrying... (${retries} left)`);
                     await new Promise(r => setTimeout(r, 1500));
                 } else {
                     throw launchErr;
@@ -100,30 +99,36 @@ app.post('/check-jamb', async (req, res) => {
             };
         });
 
-        // 3. Click into CAPS / Check Admission Status tile
+        // 3. Find direct URL to CAPS/Admission Status and navigate directly
         try {
-            const clicked = await page.evaluate(() => {
-                const clickableElements = Array.from(document.querySelectorAll('a, button, div, span, h4, p'));
-                const target = clickableElements.find(el => {
+            const capsUrl = await page.evaluate(() => {
+                const links = Array.from(document.querySelectorAll('a'));
+                const target = links.find(el => {
                     const t = el.innerText.toLowerCase();
-                    return t.includes('admission status') || t.includes('check admission');
+                    const href = (el.getAttribute('href') || '').toLowerCase();
+                    return t.includes('admission status') || t.includes('caps') || href.includes('caps') || t.includes('check admission');
                 });
-                if (target) {
-                    target.click();
-                    return true;
-                }
-                return false;
+                return target ? target.href : null;
             });
 
-            if (clicked) {
+            if (capsUrl) {
+                await page.goto(capsUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+                await new Promise(r => setTimeout(r, 6000)); // Wait for page elements to render
+            } else {
+                // Fallback click simulation if no direct href found
+                await page.evaluate(() => {
+                    const els = Array.from(document.querySelectorAll('div, span, h4, p, button'));
+                    const el = els.find(e => e.innerText.toLowerCase().includes('admission status') || e.innerText.toLowerCase().includes('caps'));
+                    if (el) el.click();
+                });
                 await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).catch(() => {});
-                await new Promise(r => setTimeout(r, 7000));
+                await new Promise(r => setTimeout(r, 6000));
             }
         } catch (e) {
-            console.log("CAPS navigation click notice:", e.message);
+            console.log("Direct CAPS navigation notice:", e.message);
         }
 
-        // 4. Extract Institution & Course from CAPS admission page
+        // 4. Extract Institution & Course from the CAPS page layout
         const capsData = await page.evaluate(() => {
             const bodyText = document.body.innerText || "";
             const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
@@ -137,16 +142,16 @@ app.post('/check-jamb', async (req, res) => {
             for (let i = 0; i < lines.length; i++) {
                 const cur = lines[i].toLowerCase();
 
-                if ((cur.includes('institution:') || cur === 'institution') && lines[i+1]) {
+                if ((cur.includes('institution') || cur === 'institution:') && lines[i+1]) {
                     const val = lines[i+1];
-                    if (!ignoreList.some(ig => val.toLowerCase().includes(ig))) {
+                    if (!ignoreList.some(ig => val.toLowerCase().includes(ig)) && val.length > 3) {
                         institution = val;
                     }
                 }
 
                 if ((cur.includes('course') || cur.includes('programme')) && lines[i+1] && !cur.includes('subject')) {
                     const val = lines[i+1];
-                    if (!ignoreList.some(ig => val.toLowerCase().includes(ig))) {
+                    if (!ignoreList.some(ig => val.toLowerCase().includes(ig)) && val.length > 3) {
                         course = val;
                     }
                 }
