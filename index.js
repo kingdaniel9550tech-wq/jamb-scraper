@@ -57,60 +57,49 @@ app.post('/check-jamb', async (req, res) => {
             return res.json({ success: false, message: "Invalid Email or Password. Please check your credentials." });
         }
 
-        // 3. Navigate to Candidate Dashboard / CAPS
+        // 3. Navigate to Candidate Dashboard
         await page.goto('https://efacility.jamb.gov.ng/Candidate', { waitUntil: 'networkidle2', timeout: 30000 });
-        await new Promise(r => setTimeout(r, 5000)); // Allow full dashboard rendering
+        await new Promise(r => setTimeout(r, 5000)); // Allow full DOM render
 
-        // 4. Advanced DOM & Text Parsing to pull exact candidate data
+        // 4. Clean, Line-by-Line Content Parser
         const candidateData = await page.evaluate(() => {
-            const getByLabel = (keywords) => {
-                const elements = Array.from(document.querySelectorAll('span, p, div, td, th, label, h4, h3, b, strong'));
-                for (let el of elements) {
-                    const text = el.innerText.trim();
-                    for (let kw of keywords) {
-                        if (text.toLowerCase().includes(kw.toLowerCase())) {
-                            if (text.includes(':')) {
-                                const parts = text.split(':');
-                                if (parts[1] && parts[1].trim().length > 1) return parts[1].trim();
-                            }
-                            if (el.nextElementSibling) {
-                                const siblingText = el.nextElementSibling.innerText.trim();
-                                if (siblingText && siblingText.length > 1) return siblingText;
-                            }
-                        }
+            const bodyText = document.body.innerText || "";
+            const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+
+            let name = "Verified Candidate";
+            let profileCode = "Available on Portal";
+            let institution = "Selected Institution";
+            let course = "Applied Program";
+
+            for (let i = 0; i < lines.length; i++) {
+                const current = lines[i].toLowerCase();
+                
+                // Look for Name indicators
+                if ((current.includes("welcome") || current.includes("name")) && lines[i+1]) {
+                    if (!lines[i+1].toLowerCase().includes("dashboard") && lines[i+1].length > 3) {
+                        name = lines[i+1];
                     }
                 }
-                return null;
-            };
-
-            const fullText = document.body.innerText;
-            const matchRegex = (regex) => {
-                const match = fullText.match(regex);
-                return match && match[1] ? match[1].trim() : null;
-            };
-
-            let name = getByLabel(['welcome', 'candidate name', 'full name', 'name']) || 
-                       matchRegex(/Welcome,?\s*([A-Z\s]+)(?:\n|$)/i);
-
-            let profileCode = getByLabel(['profile code', 'profileid', 'code']) || 
-                              matchRegex(/Profile\s*Code[:\s]*([A-Z0-9]+)/i);
-
-            let institution = getByLabel(['institution', 'university', 'polytechnic', 'choice']) || 
-                              matchRegex(/Institution[:\s]*([A-Za-z\s()]+)(?:\n|$)/i);
-
-            let course = getByLabel(['course', 'programme', 'department']) || 
-                         matchRegex(/(?:Course|Programme|Department)[:\s]*([A-Za-z\s()\/]+)(?:\n|$)/i);
-
-            if (name) {
-                name = name.split('\n')[0].replace(/Welcome/gi, '').replace(/[:]/g, '').trim();
+                // Look for Profile Code indicators
+                if (current.includes("profile code") && lines[i+1]) {
+                    profileCode = lines[i+1];
+                }
+                // Look for Institution choices
+                if ((current.includes("institution") || current.includes("university") || current.includes("polytechnic")) && lines[i+1]) {
+                    institution = lines[i+1];
+                }
+                // Look for Course/Program choices
+                if ((current.includes("programme") || current.includes("course") || current.includes("department")) && lines[i+1]) {
+                    course = lines[i+1];
+                }
             }
 
             return {
-                name: name || matchRegex(/([A-Z]{3,}\s+[A-Z]{3,}\s+[A-Z]{3,})/i) || "Verified Student",
-                profileCode: profileCode || "Available on Portal",
-                institution: institution || "Selected Institution",
-                course: course || "Applied Program",
-                status: fullText.includes("Admitted") ? "🎉 ADMISSION OFFERED / APPROVED" : "⏳ Admission in Progress / Not Admitted Yet"
+                name: name !== "Verified Candidate" ? name : (lines.find(l => l.length > 5 && l === l.toUpperCase()) || "JAMB Student"),
+                profileCode: profileCode,
+                institution: institution,
+                course: course,
+                status: bodyText.includes("Admitted") ? "🎉 ADMISSION OFFERED / APPROVED" : "⏳ Admission in Progress / Not Admitted Yet"
             };
         });
 
