@@ -1,0 +1,16 @@
+{
+  "name": "jamb-scraper-api",
+  "version": "1.0.0",
+  "description": "External Puppeteer scraper for JAMB",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "puppeteer": "^22.15.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
