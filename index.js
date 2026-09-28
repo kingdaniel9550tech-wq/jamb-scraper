@@ -99,92 +99,90 @@ app.post('/check-jamb', async (req, res) => {
             };
         });
 
-        // 3. Click the Admission Status / CAPS card
+        // 3. Click CAPS button and capture the NEW TAB / POPUP window
+        let targetPage = page;
         try {
+            const newPagePromise = new Promise(resolve => {
+                browser.once('targetcreated', async target => {
+                    const newPage = await target.page();
+                    resolve(newPage);
+                });
+            });
+
+            // Trigger the click that opens the popup tab
             await page.evaluate(() => {
                 const elements = Array.from(document.querySelectorAll('a, button, div, span, h4, p'));
                 const target = elements.find(el => {
                     const t = el.innerText.toLowerCase();
                     return t.includes('admission status') || t.includes('caps') || t.includes('check admission');
                 });
-                if (target) target.click();
-            });
-            await new Promise(r => setTimeout(r, 8000)); // Wait for iframe/sub-view to load
-        } catch (e) {
-            console.log("CAPS click notice:", e.message);
-        }
-
-        // 4. Scan ALL Frames and Iframes for Institution and Course data
-        let capsFound = false;
-        const frames = page.frames();
-
-        for (const frame of frames) {
-            try {
-                const frameData = await frame.evaluate(() => {
-                    const bodyText = document.body.innerText || "";
-                    const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-
-                    let inst = null;
-                    let crs = null;
-                    let stat = null;
-
-                    const ignoreList = ["application for", "correction", "condonement", "change of", "downward"];
-
-                    for (let i = 0; i < lines.length; i++) {
-                        const cur = lines[i].toLowerCase();
-
-                        if ((cur.includes('institution') || cur === 'institution:') && lines[i+1]) {
-                            const val = lines[i+1];
-                            if (!ignoreList.some(ig => val.toLowerCase().includes(ig)) && val.length > 3) {
-                                inst = val;
-                            }
-                        }
-
-                        if ((cur.includes('course') || cur.includes('programme')) && lines[i+1] && !cur.includes('subject')) {
-                            const val = lines[i+1];
-                            if (!ignoreList.some(ig => val.toLowerCase().includes(ig)) && val.length > 3) {
-                                crs = val;
-                            }
-                        }
-
-                        if (cur.includes('admission status') && lines[i+1]) {
-                            stat = lines[i+1];
-                        }
-                    }
-
-                    return { inst, crs, stat, hasContent: bodyText.includes("Institution") || bodyText.includes("UTME") };
-                });
-
-                if (frameData.hasContent && (frameData.inst || frameData.crs)) {
-                    if (frameData.inst) candidateData.institution = frameData.inst;
-                    if (frameData.crs) candidateData.course = frameData.crs;
-                    if (frameData.stat) {
-                        if (frameData.stat.toUpperCase().includes("ADMITTED") && !frameData.stat.toUpperCase().includes("NOT")) {
-                            candidateData.status = "🎉 ADMISSION OFFERED / APPROVED";
-                        } else if (frameData.stat.toUpperCase().includes("NOT")) {
-                            candidateData.status = "❌ NOT ADMITTED YET";
-                        }
-                    }
-                    capsFound = true;
-                    break;
+                if (target) {
+                    target.click();
                 }
-            } catch (err) {
-                // Ignore cross-origin frame restriction errors
+            });
+
+            // Wait up to 8 seconds for the new tab to appear
+            const popupPage = await Promise.race([
+                newPagePromise,
+                new Promise(resolve => setTimeout(() => resolve(null), 8000))
+            ]);
+
+            if (popupPage) {
+                targetPage = popupPage;
+                await targetPage.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).catch(() => {});
+                await new Promise(r => setTimeout(r, 6000)); // Let the portal load fully
             }
+        } catch (e) {
+            console.log("Popup tab navigation notice:", e.message);
         }
 
-        // Fallback check on main body text if frames didn't catch it
-        if (!capsFound) {
-            const bodyText = await page.evaluate(() => document.body.innerText);
-            if (bodyText.includes("Ekiti State University")) {
-                candidateData.institution = "Ekiti State University, Ado-Ekiti, Ekiti State";
+        // 4. Extract Institution, Course, and Status from the active page (the CAPS popup)
+        const capsData = await targetPage.evaluate(() => {
+            const bodyText = document.body.innerText || "";
+            const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+
+            let institution = null;
+            let course = null;
+            let admissionStatus = null;
+
+            const ignoreList = ["application for", "correction", "condonement", "change of", "downward"];
+
+            for (let i = 0; i < lines.length; i++) {
+                const cur = lines[i].toLowerCase();
+
+                if ((cur.includes('institution') || cur === 'institution:') && lines[i+1]) {
+                    const val = lines[i+1];
+                    if (!ignoreList.some(ig => val.toLowerCase().includes(ig)) && val.length > 3) {
+                        institution = val;
+                    }
+                }
+
+                if ((cur.includes('course') || cur.includes('programme')) && lines[i+1] && !cur.includes('subject')) {
+                    const val = lines[i+1];
+                    if (!ignoreList.some(ig => val.toLowerCase().includes(ig)) && val.length > 3) {
+                        course = val;
+                    }
+                }
+
+                if (cur.includes('admission status') && lines[i+1]) {
+                    admissionStatus = lines[i+1];
+                }
             }
-            if (bodyText.includes("Education & Economics")) {
-                candidateData.course = "Education & Economics";
-            }
-            if (bodyText.includes("NOT ADMITTED")) {
-                candidateData.status = "❌ NOT ADMITTED YET";
-            }
+
+            return {
+                institution: institution || null,
+                course: course || null,
+                statusText: admissionStatus || (bodyText.includes("NOT ADMITTED") ? "NOT ADMITTED" : (bodyText.includes("ADMITTED") ? "ADMITTED" : ""))
+            };
+        });
+
+        if (capsData.institution) candidateData.institution = capsData.institution;
+        if (capsData.course) candidateData.course = capsData.course;
+        
+        if (capsData.statusText.toUpperCase().includes("ADMITTED") && !capsData.statusText.toUpperCase().includes("NOT")) {
+            candidateData.status = "🎉 ADMISSION OFFERED / APPROVED";
+        } else if (capsData.statusText.toUpperCase().includes("NOT ADMITTED")) {
+            candidateData.status = "❌ NOT ADMITTED YET";
         }
 
         await browser.close();
