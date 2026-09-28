@@ -72,9 +72,9 @@ app.post('/check-jamb', async (req, res) => {
             return res.json({ success: false, message: "Invalid Email or Password. Please check your credentials." });
         }
 
-        await new Promise(r => setTimeout(r, 4000));
+        await new Promise(r => setTimeout(r, 3000));
 
-        // 2. Extract Candidate Name and Profile Code from Main Dashboard
+        // 2. Extract Candidate Name and Profile Code from Dashboard
         let candidateData = await page.evaluate(() => {
             const bodyText = document.body.innerText || "";
             
@@ -99,41 +99,19 @@ app.post('/check-jamb', async (req, res) => {
             };
         });
 
-        // 3. Click the Admission Status / CAPS card
+        // 3. Directly jump to the exact CAPS Admission page using the session cookie!
         try {
-            await page.evaluate(() => {
-                const elements = Array.from(document.querySelectorAll('a, button, div, span, h4, p'));
-                const target = elements.find(el => {
-                    const t = el.innerText.toLowerCase();
-                    return t.includes('admission status') || t.includes('caps') || t.includes('check admission');
-                });
-                if (target) target.click();
+            await page.goto('https://caps.jamb.gov.ng/login/app_candidates/candidateadmission.aspx', { 
+                waitUntil: 'networkidle2', 
+                timeout: 35000 
             });
-        } catch (e) {
-            console.log("CAPS click notice:", e.message);
+            await new Promise(r => setTimeout(r, 6000)); // Allow background AJAX to populate rows
+        } catch (navErr) {
+            console.log("Direct CAPS page goto notice:", navErr.message);
         }
 
-        // 4. Dynamic Polling: Wait and check every 3s (up to 5 attempts = 15s max) until CAPS data appears
-        let capsLoaded = false;
-        for (let attempt = 1; attempt <= 5; attempt++) {
-            await new Promise(r => setTimeout(r, 3000)); // wait 3 seconds per check
-            
-            const checkData = await page.evaluate(() => {
-                const bodyText = document.body.innerText || "";
-                return {
-                    hasLoaded: bodyText.includes("Institution:") || bodyText.includes("Institution") || bodyText.includes("UTME / DE ADMISSION"),
-                    fullText: bodyText
-                };
-            });
-
-            if (checkData.hasLoaded) {
-                capsLoaded = true;
-                break;
-            }
-        }
-
-        // 5. Extract Institution & Course from the page once loaded
-        const finalCapsData = await page.evaluate(() => {
+        // 4. Extract Institution, Course, and Status from the target page
+        const capsData = await page.evaluate(() => {
             const bodyText = document.body.innerText || "";
             const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
 
@@ -172,12 +150,12 @@ app.post('/check-jamb', async (req, res) => {
             };
         });
 
-        if (finalCapsData.institution) candidateData.institution = finalCapsData.institution;
-        if (finalCapsData.course) candidateData.course = finalCapsData.course;
+        if (capsData.institution) candidateData.institution = capsData.institution;
+        if (capsData.course) candidateData.course = capsData.course;
         
-        if (finalCapsData.statusText.toUpperCase().includes("ADMITTED") && !finalCapsData.statusText.toUpperCase().includes("NOT")) {
+        if (capsData.statusText.toUpperCase().includes("ADMITTED") && !capsData.statusText.toUpperCase().includes("NOT")) {
             candidateData.status = "🎉 ADMISSION OFFERED / APPROVED";
-        } else if (finalCapsData.statusText.toUpperCase().includes("NOT")) {
+        } else if (capsData.statusText.toUpperCase().includes("NOT")) {
             candidateData.status = "❌ NOT ADMITTED YET";
         }
 
