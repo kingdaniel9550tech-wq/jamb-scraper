@@ -99,15 +99,37 @@ app.post('/check-jamb', async (req, res) => {
             };
         });
 
-        // 3. Directly jump to the exact CAPS Admission page using the session cookie!
+        // 3. Directly navigate to CAPS candidate admission page
         try {
             await page.goto('https://caps.jamb.gov.ng/login/app_candidates/candidateadmission.aspx', { 
                 waitUntil: 'networkidle2', 
                 timeout: 35000 
             });
-            await new Promise(r => setTimeout(r, 6000)); // Allow background AJAX to populate rows
+            await new Promise(r => setTimeout(r, 4000));
+
+            // Auto-select the exam year dropdown if present on the page
+            await page.evaluate(() => {
+                const selects = Array.from(document.querySelectorAll('select'));
+                for (const sel of selects) {
+                    // Look for options containing years like 2025, 2026, etc.
+                    const options = Array.from(sel.options);
+                    const validOption = options.find(opt => opt.text.includes('2025') || opt.text.includes('2026') || opt.text.includes('2024'));
+                    if (validOption) {
+                        sel.value = validOption.value;
+                        sel.dispatchEvent(new Event('change', { bubbles: true }));
+                        break;
+                    } else if (options.length > 1) {
+                        // Default to the first actual selection if specific year text isn't matched
+                        sel.selectedIndex = options.length - 1;
+                        sel.dispatchEvent(new Event('change', { bubbles: true }));
+                        break;
+                    }
+                }
+            });
+
+            await new Promise(r => setTimeout(r, 6000)); // Wait for table rows to load after year selection
         } catch (navErr) {
-            console.log("Direct CAPS page goto notice:", navErr.message);
+            console.log("Direct CAPS page action notice:", navErr.message);
         }
 
         // 4. Extract Institution, Course, and Status from the target page
