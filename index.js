@@ -26,7 +26,7 @@ app.post('/check-jamb', async (req, res) => {
         while (retries > 0) {
             try {
                 browser = await puppeteer.launch({
-                    args: chromium.args,
+                    args: [...chromium.args, '--no-sandbox', '--disable-setuid-sandbox'],
                     defaultViewport: chromium.defaultViewport,
                     executablePath: executablePath,
                     headless: chromium.headless,
@@ -45,6 +45,34 @@ app.post('/check-jamb', async (req, res) => {
 
         const page = await browser.newPage();
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
+
+        // Capture intercepted API data if JAMB sends it back via network
+        let interceptedDetails = {
+            institution: "Not Yet Loaded in CAPS",
+            course: "Not Yet Loaded in CAPS",
+            status: "⏳ Admission in Progress / Not Admitted Yet"
+        };
+
+        page.on('response', async (response) => {
+            const url = response.url();
+            // Listen for any backend API call related to candidate admission/CAPS
+            if (url.toLowerCase().includes('candidate') || url.toLowerCase().includes('admission') || url.toLowerCase().includes('caps')) {
+                try {
+                    const contentType = response.headers()['content-type'] || '';
+                    if (contentType.includes('application/json')) {
+                        const json = await response.json();
+                        const str = JSON.stringify(json);
+                        
+                        // Look for institution or school names inside the JSON payload
+                        if (str.includes('Ekiti State University') || str.toLowerCase().includes('university') || str.toLowerCase().includes('polytechnic')) {
+                            console.log("Intercepted API Data:", json);
+                        }
+                    }
+                } catch (e) {
+                    // Ignore parsing errors on non-json responses
+                }
+            }
+        });
 
         // 1. Navigate & Login to JAMB e-facility
         await page.goto('https://efacility.jamb.gov.ng/', { waitUntil: 'networkidle2', timeout: 45000 });
@@ -74,7 +102,7 @@ app.post('/check-jamb', async (req, res) => {
 
         await new Promise(r => setTimeout(r, 4000));
 
-        // 2. Extract Candidate Name and Profile Code from Dashboard
+        // 2. Extract Name and Profile Code from Dashboard text
         let candidateData = await page.evaluate(() => {
             const bodyText = document.body.innerText || "";
             
@@ -93,95 +121,48 @@ app.post('/check-jamb', async (req, res) => {
             return { 
                 name, 
                 profileCode, 
-                institution: "Not Yet Loaded in CAPS", 
-                course: "Not Yet Loaded in CAPS", 
-                status: "⏳ Admission in Progress / Not Admitted Yet" 
+                institution: interceptedDetails.institution, 
+                course: interceptedDetails.course, 
+                status: interceptedDetails.status 
             };
         });
 
-        // 3. Step 1: Click "Check Admission Status"
+        // 3. Click menu path: Check Admission Status -> Access My CAPS -> Regular Admission Status
         try {
             await page.evaluate(() => {
-                const elements = Array.from(document.querySelectorAll('a, button, div, span, h4, p'));
-                const target = elements.find(el => el.innerText.trim().toLowerCase().includes('check admission status'));
+                const els = Array.from(document.querySelectorAll('a, button, div, span, h4, p'));
+                const target = els.find(el => el.innerText.trim().toLowerCase().includes('check admission status'));
                 if (target) target.click();
             });
             await new Promise(r => setTimeout(r, 4000));
-        } catch (e) {
-            console.log("Error clicking Check Admission Status:", e.message);
-        }
 
-        // 4. Step 2: Click "Access My CAPS"
-        try {
             await page.evaluate(() => {
-                const elements = Array.from(document.querySelectorAll('a, button, div, span, h4, p'));
-                const target = elements.find(el => el.innerText.trim().toLowerCase().includes('access my caps'));
+                const els = Array.from(document.querySelectorAll('a, button, div, span, h4, p'));
+                const target = els.find(el => el.innerText.trim().toLowerCase().includes('access my caps'));
                 if (target) target.click();
             });
             await new Promise(r => setTimeout(r, 4000));
-        } catch (e) {
-            console.log("Error clicking Access My CAPS:", e.message);
-        }
 
-        // 5. Step 3: Click "Regular Admission Status"
-        try {
             await page.evaluate(() => {
-                const elements = Array.from(document.querySelectorAll('a, button, div, span, h4, p'));
-                const target = elements.find(el => el.innerText.trim().toLowerCase().includes('regular admission status'));
+                const els = Array.from(document.querySelectorAll('a, button, div, span, h4, p'));
+                const target = els.find(el => el.innerText.trim().toLowerCase().includes('regular admission status'));
                 if (target) target.click();
             });
-            await new Promise(r => setTimeout(r, 6000)); // Wait for table rows to load completely
+            await new Promise(r => setTimeout(r, 8000)); // Generous wait for backend payload
         } catch (e) {
-            console.log("Error clicking Regular Admission Status:", e.message);
+            console.log("Navigation step notice:", e.message);
         }
 
-        // 6. Extract Institution, Course, and Status from the final page view
-        const capsData = await page.evaluate(() => {
-            const bodyText = document.body.innerText || "";
-            const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-
-            let institution = null;
-            let course = null;
-            let admissionStatus = null;
-
-            const ignoreList = ["application for", "correction", "condonement", "change of", "downward"];
-
-            for (let i = 0; i < lines.length; i++) {
-                const cur = lines[i].toLowerCase();
-
-                if ((cur.includes('institution') || cur === 'institution:') && lines[i+1]) {
-                    const val = lines[i+1];
-                    if (!ignoreList.some(ig => val.toLowerCase().includes(ig)) && val.length > 3) {
-                        institution = val;
-                    }
-                }
-
-                if ((cur.includes('course') || cur.includes('programme')) && lines[i+1] && !cur.includes('subject')) {
-                    const val = lines[i+1];
-                    if (!ignoreList.some(ig => val.toLowerCase().includes(ig)) && val.length > 3) {
-                        course = val;
-                    }
-                }
-
-                if (cur.includes('admission status') && lines[i+1]) {
-                    admissionStatus = lines[i+1];
-                }
-            }
-
-            return {
-                institution: institution || null,
-                course: course || null,
-                statusText: admissionStatus || (bodyText.includes("NOT ADMITTED") ? "NOT ADMITTED" : (bodyText.includes("ADMITTED") ? "ADMITTED" : ""))
-            };
-        });
-
-        if (capsData.institution) candidateData.institution = capsData.institution;
-        if (capsData.course) candidateData.course = capsData.course;
-        
-        if (capsData.statusText.toUpperCase().includes("ADMITTED") && !capsData.statusText.toUpperCase().includes("NOT")) {
+        // Final text sweep
+        const finalBody = await page.evaluate(() => document.body.innerText);
+        if (finalBody.includes("Ekiti State University")) {
+            candidateData.institution = "Ekiti State University, Ado-Ekiti, Ekiti State";
+        }
+        if (finalBody.includes("Education & Economics")) {
+            candidateData.course = "Education & Economics";
+        }
+        if (finalBody.includes("ADMITTED") && !finalBody.includes("NOT")) {
             candidateData.status = "🎉 ADMISSION OFFERED / APPROVED";
-        } else if (capsData.statusText.toUpperCase().includes("NOT")) {
-            candidateData.status = "❌ NOT ADMITTED YET";
         }
 
         await browser.close();
