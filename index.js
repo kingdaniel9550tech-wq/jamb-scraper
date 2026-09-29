@@ -120,21 +120,58 @@ app.post('/check-jamb', async (req, res) => {
                 const target = els.find(el => el.innerText.trim().toLowerCase().includes('regular admission status'));
                 if (target) target.click();
             });
-            await new Promise(r => setTimeout(r, 8000)); // Generous wait for backend payload
+            await new Promise(r => setTimeout(r, 8000)); // Wait for page elements to render
         } catch (e) {
             console.log("Navigation step notice:", e.message);
         }
 
-        // Final text sweep
-        const finalBody = await page.evaluate(() => document.body.innerText);
-        if (finalBody.includes("Ekiti State University")) {
-            candidateData.institution = "Ekiti State University, Ado-Ekiti, Ekiti State";
-        }
-        if (finalBody.includes("Education & Economics")) {
-            candidateData.course = "Education & Economics";
-        }
-        if (finalBody.includes("ADMITTED") && !finalBody.includes("NOT")) {
+        // 4. Final text sweep for Institution and Course data on the active page
+        const capsData = await page.evaluate(() => {
+            const bodyText = document.body.innerText || "";
+            const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+
+            let institution = null;
+            let course = null;
+            let admissionStatus = null;
+
+            const ignoreList = ["application for", "correction", "condonement", "change of", "downward"];
+
+            for (let i = 0; i < lines.length; i++) {
+                const cur = lines[i].toLowerCase();
+
+                if ((cur.includes('institution') || cur === 'institution:') && lines[i+1]) {
+                    const val = lines[i+1];
+                    if (!ignoreList.some(ig => val.toLowerCase().includes(ig)) && val.length > 3) {
+                        institution = val;
+                    }
+                }
+
+                if ((cur.includes('course') || cur.includes('programme')) && lines[i+1] && !cur.includes('subject')) {
+                    const val = lines[i+1];
+                    if (!ignoreList.some(ig => val.toLowerCase().includes(ig)) && val.length > 3) {
+                        course = val;
+                    }
+                }
+
+                if (cur.includes('admission status') && lines[i+1]) {
+                    admissionStatus = lines[i+1];
+                }
+            }
+
+            return {
+                institution: institution || null,
+                course: course || null,
+                statusText: admissionStatus || (bodyText.includes("NOT ADMITTED") ? "NOT ADMITTED" : (bodyText.includes("ADMITTED") ? "ADMITTED" : ""))
+            };
+        });
+
+        if (capsData.institution) candidateData.institution = capsData.institution;
+        if (capsData.course) candidateData.course = capsData.course;
+        
+        if (capsData.statusText && capsData.statusText.toUpperCase().includes("ADMITTED") && !capsData.statusText.toUpperCase().includes("NOT")) {
             candidateData.status = "🎉 ADMISSION OFFERED / APPROVED";
+        } else if (capsData.statusText && capsData.statusText.toUpperCase().includes("NOT")) {
+            candidateData.status = "❌ NOT ADMITTED YET";
         }
 
         await browser.close();
