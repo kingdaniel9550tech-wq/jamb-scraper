@@ -123,7 +123,7 @@ app.post('/check-jamb', async (req, res) => {
             await new Promise(r => setTimeout(r, 8000)); 
         } catch (e) {}
 
-        // 7. Refined Data Extraction Logic (Ignores Sidebar Elements)
+        // 7. ULTRA-AGGRESSIVE DATA EXTRACTION
         const extractLogic = () => {
             const bodyText = document.body.innerText || "";
             const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
@@ -132,39 +132,59 @@ app.post('/check-jamb', async (req, res) => {
             let crs = null;
             let stat = null;
             
-            // Added "transferred" and sidebar elements to the ignore list
+            // Ignore list for sidebar junk
             const ignoreList = [
                 "application for", "correction", "condonement", "change of", 
                 "downward", "not yet loaded", "transferred", "transfer", 
-                "approval", "caps", "dashboard", "print"
+                "approval", "caps", "dashboard", "print", "status"
             ];
+
+            const cleanValue = (val) => {
+                if (!val) return null;
+                const lower = val.toLowerCase();
+                if (ignoreList.some(ig => lower.includes(ig))) return null;
+                if (val.length < 4) return null;
+                return val;
+            };
 
             for (let i = 0; i < lines.length; i++) {
                 const cur = lines[i].toLowerCase();
+                const originalLine = lines[i];
                 
-                if ((cur === 'institution' || cur === 'institution:') && lines[i+1]) {
-                    const val = lines[i+1];
-                    if (!ignoreList.some(ig => val.toLowerCase().includes(ig)) && val.length > 3) inst = val;
+                // --- PARSE INSTITUTION ---
+                if (cur.includes('institution') && !cur.includes('transferred')) {
+                    // Check if they are on the SAME line (e.g., "Institution: University of Lagos")
+                    const splitVal = originalLine.split(/institution[\s:]+/i);
+                    if (splitVal.length > 1 && splitVal[1].trim().length > 3) {
+                        inst = cleanValue(splitVal[1].trim());
+                    } 
+                    // Otherwise, check the NEXT line
+                    else if (lines[i+1]) {
+                        inst = cleanValue(lines[i+1]);
+                    }
                 }
                 
-                if ((cur === 'course' || cur === 'course:' || cur === 'programme' || cur === 'programme:') && lines[i+1]) {
-                    const val = lines[i+1];
-                    if (!ignoreList.some(ig => val.toLowerCase().includes(ig)) && val.length > 3) crs = val;
+                // --- PARSE COURSE ---
+                if ((cur.includes('course') || cur.includes('programme')) && !cur.includes('subject')) {
+                    const splitVal = originalLine.split(/(?:course|programme)[\s:]+/i);
+                    if (splitVal.length > 1 && splitVal[1].trim().length > 3) {
+                        crs = cleanValue(splitVal[1].trim());
+                    }
+                    else if (lines[i+1]) {
+                        crs = cleanValue(lines[i+1]);
+                    }
                 }
                 
-                if ((cur === 'admission status' || cur === 'admission status:') && lines[i+1]) {
-                    stat = lines[i+1];
+                // --- PARSE STATUS ---
+                if (cur.includes('admission status') && !cur.includes('regular')) {
+                    const splitVal = originalLine.split(/admission status[\s:]+/i);
+                    if (splitVal.length > 1 && splitVal[1].trim().length > 3) {
+                        stat = splitVal[1].trim();
+                    }
+                    else if (lines[i+1]) {
+                        stat = lines[i+1];
+                    }
                 }
-            }
-
-            // Fallback Regex
-            if (!inst) {
-                const iMatch = bodyText.match(/Institution[:\s]+([^\n]+)/i);
-                if (iMatch && !ignoreList.some(ig => iMatch[1].toLowerCase().includes(ig))) inst = iMatch[1].trim();
-            }
-            if (!crs) {
-                const cMatch = bodyText.match(/(?:Course|Programme)[:\s]+([^\n]+)/i);
-                if (cMatch && !ignoreList.some(ig => cMatch[1].toLowerCase().includes(ig))) crs = cMatch[1].trim();
             }
 
             return { 
@@ -176,6 +196,7 @@ app.post('/check-jamb', async (req, res) => {
 
         let capsFound = false;
         
+        // Scan inside iframes first
         for (const frame of activePage.frames()) {
             try {
                 const fData = await frame.evaluate(extractLogic);
@@ -190,11 +211,12 @@ app.post('/check-jamb', async (req, res) => {
                         }
                     }
                     capsFound = true;
-                    break; // Stop looking once we find the real data in a frame
+                    break; 
                 }
             } catch (e) {}
         }
 
+        // Scan main page if iframes didn't have it
         if (!capsFound) {
             const mData = await activePage.evaluate(extractLogic);
             if (mData.inst) candidateData.institution = mData.inst;
