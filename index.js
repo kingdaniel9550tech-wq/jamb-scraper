@@ -46,34 +46,6 @@ app.post('/check-jamb', async (req, res) => {
         const page = await browser.newPage();
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
 
-        // Capture intercepted API data if JAMB sends it back via network
-        let interceptedDetails = {
-            institution: "Not Yet Loaded in CAPS",
-            course: "Not Yet Loaded in CAPS",
-            status: "⏳ Admission in Progress / Not Admitted Yet"
-        };
-
-        page.on('response', async (response) => {
-            const url = response.url();
-            // Listen for any backend API call related to candidate admission/CAPS
-            if (url.toLowerCase().includes('candidate') || url.toLowerCase().includes('admission') || url.toLowerCase().includes('caps')) {
-                try {
-                    const contentType = response.headers()['content-type'] || '';
-                    if (contentType.includes('application/json')) {
-                        const json = await response.json();
-                        const str = JSON.stringify(json);
-                        
-                        // Look for institution or school names inside the JSON payload
-                        if (str.includes('Ekiti State University') || str.toLowerCase().includes('university') || str.toLowerCase().includes('polytechnic')) {
-                            console.log("Intercepted API Data:", json);
-                        }
-                    }
-                } catch (e) {
-                    // Ignore parsing errors on non-json responses
-                }
-            }
-        });
-
         // 1. Navigate & Login to JAMB e-facility
         await page.goto('https://efacility.jamb.gov.ng/', { waitUntil: 'networkidle2', timeout: 45000 });
 
@@ -121,9 +93,9 @@ app.post('/check-jamb', async (req, res) => {
             return { 
                 name, 
                 profileCode, 
-                institution: interceptedDetails.institution, 
-                course: interceptedDetails.course, 
-                status: interceptedDetails.status 
+                institution: "Not Yet Loaded in CAPS", 
+                course: "Not Yet Loaded in CAPS", 
+                status: "⏳ Admission in Progress / Not Admitted Yet" 
             };
         });
 
