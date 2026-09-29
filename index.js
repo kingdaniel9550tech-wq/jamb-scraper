@@ -49,24 +49,16 @@ app.post('/check-jamb', async (req, res) => {
         // 1. Navigate & Login to JAMB e-facility
         await page.goto('https://efacility.jamb.gov.ng/', { waitUntil: 'networkidle2', timeout: 45000 });
 
-        const emailSelector = 'input#Email, input#email, input[name="Email"], input[name="email"]';
-        const passwordSelector = 'input#Password, input#password, input[name="Password"], input[name="password"]';
-
-        await page.waitForSelector(emailSelector, { timeout: 15000 });
-        await page.type(emailSelector, email, { delay: 30 });
-
-        await page.waitForSelector(passwordSelector, { timeout: 15000 });
-        await page.type(passwordSelector, password, { delay: 30 });
-
-        const loginBtnSelector = 'button[type="submit"], input[type="submit"], #loginButton, button.btn-primary';
-        await page.waitForSelector(loginBtnSelector, { timeout: 10000 });
+        await page.waitForSelector('input#email, input#Email', { timeout: 15000 });
+        await page.type('input#email, input#Email', email, { delay: 30 });
+        await page.type('input#password, input#Password', password, { delay: 30 });
 
         await Promise.all([
-            page.click(loginBtnSelector),
+            page.click('button[type="submit"], input[type="submit"], #loginButton, button.btn-primary'),
             page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {})
         ]);
 
-        const isStillOnLogin = await page.$(passwordSelector);
+        const isStillOnLogin = await page.$('input#password, input#Password');
         if (isStillOnLogin) {
             await browser.close();
             return res.json({ success: false, message: "Invalid Email or Password. Please check your credentials." });
@@ -74,21 +66,16 @@ app.post('/check-jamb', async (req, res) => {
 
         await new Promise(r => setTimeout(r, 4000));
 
-        // 2. Extract Name and Profile Code from Dashboard text
+        // 2. Extract Candidate Name and Profile Code
         let candidateData = await page.evaluate(() => {
             const bodyText = document.body.innerText || "";
-            
             let name = "Verified Candidate";
             const nameMatch = bodyText.match(/Welcome\s*Back\s*([^\r\n.]+)/i);
-            if (nameMatch) {
-                name = nameMatch[1].replace(/[.!]/g, '').trim();
-            }
+            if (nameMatch) name = nameMatch[1].replace(/[.!]/g, '').trim();
 
             let profileCode = "Not Found";
             const pcMatch = bodyText.match(/Profile\s*Code[:\s]*([0-9]+)/i) || bodyText.match(/\b([0-9][A-Z0-9]{9})\b/);
-            if (pcMatch) {
-                profileCode = pcMatch[1];
-            }
+            if (pcMatch) profileCode = pcMatch[1];
 
             return { 
                 name, 
@@ -99,7 +86,7 @@ app.post('/check-jamb', async (req, res) => {
             };
         });
 
-        // 3. Click menu path: Check Admission Status -> Access My CAPS -> Regular Admission Status
+        // 3. Click "Check Admission Status"
         try {
             await page.evaluate(() => {
                 const els = Array.from(document.querySelectorAll('a, button, div, span, h4, p'));
@@ -107,71 +94,112 @@ app.post('/check-jamb', async (req, res) => {
                 if (target) target.click();
             });
             await new Promise(r => setTimeout(r, 4000));
+        } catch (e) {}
 
+        // 4. Click "Access My CAPS" (This usually opens a New Tab)
+        try {
             await page.evaluate(() => {
                 const els = Array.from(document.querySelectorAll('a, button, div, span, h4, p'));
                 const target = els.find(el => el.innerText.trim().toLowerCase().includes('access my caps'));
                 if (target) target.click();
             });
-            await new Promise(r => setTimeout(r, 4000));
+            await new Promise(r => setTimeout(r, 6000)); // Wait for the new tab to spawn and load
+        } catch (e) {}
 
-            await page.evaluate(() => {
-                const els = Array.from(document.querySelectorAll('a, button, div, span, h4, p'));
-                const target = els.find(el => el.innerText.trim().toLowerCase().includes('regular admission status'));
+        // CRITICAL FIX: The auto-tab switcher! 
+        // We fetch all currently open browser tabs and select the MOST RECENT one.
+        const pages = await browser.pages();
+        const activePage = pages[pages.length - 1]; 
+
+        // 5. Click "Regular Admission Status" on the new CAPS tab
+        try {
+            await activePage.evaluate(() => {
+                const els = Array.from(document.querySelectorAll('a, button, div, span, h4, p, li'));
+                const target = els.find(el => {
+                    const txt = el.innerText.trim().toLowerCase();
+                    return txt.includes('admission status') || txt.includes('regular admission');
+                });
                 if (target) target.click();
             });
-            await new Promise(r => setTimeout(r, 8000)); // Wait for page elements to render
-        } catch (e) {
-            console.log("Navigation step notice:", e.message);
-        }
+            await new Promise(r => setTimeout(r, 8000)); // Generous wait for the server database to reply
+        } catch (e) {}
 
-        // 4. Final text sweep for Institution and Course data on the active page
-        const capsData = await page.evaluate(() => {
+        // 6. Data Extraction Logic (We scan the active page AND all hidden iframes)
+        const extractLogic = () => {
             const bodyText = document.body.innerText || "";
             const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
 
-            let institution = null;
-            let course = null;
-            let admissionStatus = null;
-
-            const ignoreList = ["application for", "correction", "condonement", "change of", "downward"];
+            let inst = null;
+            let crs = null;
+            let stat = null;
+            const ignoreList = ["application for", "correction", "condonement", "change of", "downward", "not yet loaded"];
 
             for (let i = 0; i < lines.length; i++) {
                 const cur = lines[i].toLowerCase();
-
                 if ((cur.includes('institution') || cur === 'institution:') && lines[i+1]) {
                     const val = lines[i+1];
-                    if (!ignoreList.some(ig => val.toLowerCase().includes(ig)) && val.length > 3) {
-                        institution = val;
-                    }
+                    if (!ignoreList.some(ig => val.toLowerCase().includes(ig)) && val.length > 3) inst = val;
                 }
-
                 if ((cur.includes('course') || cur.includes('programme')) && lines[i+1] && !cur.includes('subject')) {
                     const val = lines[i+1];
-                    if (!ignoreList.some(ig => val.toLowerCase().includes(ig)) && val.length > 3) {
-                        course = val;
-                    }
+                    if (!ignoreList.some(ig => val.toLowerCase().includes(ig)) && val.length > 3) crs = val;
                 }
-
                 if (cur.includes('admission status') && lines[i+1]) {
-                    admissionStatus = lines[i+1];
+                    stat = lines[i+1];
                 }
             }
 
-            return {
-                institution: institution || null,
-                course: course || null,
-                statusText: admissionStatus || (bodyText.includes("NOT ADMITTED") ? "NOT ADMITTED" : (bodyText.includes("ADMITTED") ? "ADMITTED" : ""))
-            };
-        });
+            // Fallback Regex in case the table format is tight
+            if (!inst) {
+                const iMatch = bodyText.match(/Institution[:\s]+([^\n]+)/i);
+                if (iMatch && !ignoreList.some(ig => iMatch[1].toLowerCase().includes(ig))) inst = iMatch[1].trim();
+            }
+            if (!crs) {
+                const cMatch = bodyText.match(/(?:Course|Programme)[:\s]+([^\n]+)/i);
+                if (cMatch && !ignoreList.some(ig => cMatch[1].toLowerCase().includes(ig))) crs = cMatch[1].trim();
+            }
 
-        if (capsData.institution) candidateData.institution = capsData.institution;
-        if (capsData.course) candidateData.course = capsData.course;
+            return { 
+                inst, 
+                crs, 
+                stat: stat || (bodyText.includes("NOT ADMITTED") ? "NOT ADMITTED" : (bodyText.includes("ADMITTED") ? "ADMITTED" : ""))
+            };
+        };
+
+        let capsFound = false;
         
-        if (capsData.statusText && capsData.statusText.toUpperCase().includes("ADMITTED") && !capsData.statusText.toUpperCase().includes("NOT")) {
-            candidateData.status = "🎉 ADMISSION OFFERED / APPROVED";
-        } else if (capsData.statusText && capsData.statusText.toUpperCase().includes("NOT")) {
-            candidateData.status = "❌ NOT ADMITTED YET";
+        // Scan internal frames first (CAPS often drops the result inside an embedded iframe)
+        for (const frame of activePage.frames()) {
+            try {
+                const fData = await frame.evaluate(extractLogic);
+                if (fData.inst || fData.crs) {
+                    if (fData.inst) candidateData.institution = fData.inst;
+                    if (fData.crs) candidateData.course = fData.crs;
+                    if (fData.stat) {
+                        if (fData.stat.toUpperCase().includes("ADMITTED") && !fData.stat.toUpperCase().includes("NOT")) {
+                            candidateData.status = "🎉 ADMISSION OFFERED / APPROVED";
+                        } else if (fData.stat.toUpperCase().includes("NOT")) {
+                            candidateData.status = "❌ NOT ADMITTED YET";
+                        }
+                    }
+                    capsFound = true;
+                    break;
+                }
+            } catch (e) {}
+        }
+
+        // Scan main page if frames missed it
+        if (!capsFound) {
+            const mData = await activePage.evaluate(extractLogic);
+            if (mData.inst) candidateData.institution = mData.inst;
+            if (mData.crs) candidateData.course = mData.crs;
+            if (mData.stat) {
+                if (mData.stat.toUpperCase().includes("ADMITTED") && !mData.stat.toUpperCase().includes("NOT")) {
+                    candidateData.status = "🎉 ADMISSION OFFERED / APPROVED";
+                } else if (mData.stat.toUpperCase().includes("NOT")) {
+                    candidateData.status = "❌ NOT ADMITTED YET";
+                }
+            }
         }
 
         await browser.close();
