@@ -96,35 +96,34 @@ app.post('/check-jamb', async (req, res) => {
             await new Promise(r => setTimeout(r, 4000));
         } catch (e) {}
 
-        // 4. Click "Access My CAPS" (This usually opens a New Tab)
+        // 4. Click "Access My CAPS" (Spawns New Tab)
         try {
             await page.evaluate(() => {
                 const els = Array.from(document.querySelectorAll('a, button, div, span, h4, p'));
                 const target = els.find(el => el.innerText.trim().toLowerCase().includes('access my caps'));
                 if (target) target.click();
             });
-            await new Promise(r => setTimeout(r, 6000)); // Wait for the new tab to spawn and load
+            await new Promise(r => setTimeout(r, 6000)); 
         } catch (e) {}
 
-        // CRITICAL FIX: The auto-tab switcher! 
-        // We fetch all currently open browser tabs and select the MOST RECENT one.
+        // 5. Switch to the new CAPS tab
         const pages = await browser.pages();
         const activePage = pages[pages.length - 1]; 
 
-        // 5. Click "Regular Admission Status" on the new CAPS tab
+        // 6. Click "Admission Status" on the left menu
         try {
             await activePage.evaluate(() => {
                 const els = Array.from(document.querySelectorAll('a, button, div, span, h4, p, li'));
                 const target = els.find(el => {
                     const txt = el.innerText.trim().toLowerCase();
-                    return txt.includes('admission status') || txt.includes('regular admission');
+                    return txt === 'admission status' || txt === 'regular admission status';
                 });
                 if (target) target.click();
             });
-            await new Promise(r => setTimeout(r, 8000)); // Generous wait for the server database to reply
+            await new Promise(r => setTimeout(r, 8000)); 
         } catch (e) {}
 
-        // 6. Data Extraction Logic (We scan the active page AND all hidden iframes)
+        // 7. Refined Data Extraction Logic (Ignores Sidebar Elements)
         const extractLogic = () => {
             const bodyText = document.body.innerText || "";
             const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
@@ -132,24 +131,33 @@ app.post('/check-jamb', async (req, res) => {
             let inst = null;
             let crs = null;
             let stat = null;
-            const ignoreList = ["application for", "correction", "condonement", "change of", "downward", "not yet loaded"];
+            
+            // Added "transferred" and sidebar elements to the ignore list
+            const ignoreList = [
+                "application for", "correction", "condonement", "change of", 
+                "downward", "not yet loaded", "transferred", "transfer", 
+                "approval", "caps", "dashboard", "print"
+            ];
 
             for (let i = 0; i < lines.length; i++) {
                 const cur = lines[i].toLowerCase();
-                if ((cur.includes('institution') || cur === 'institution:') && lines[i+1]) {
+                
+                if ((cur === 'institution' || cur === 'institution:') && lines[i+1]) {
                     const val = lines[i+1];
                     if (!ignoreList.some(ig => val.toLowerCase().includes(ig)) && val.length > 3) inst = val;
                 }
-                if ((cur.includes('course') || cur.includes('programme')) && lines[i+1] && !cur.includes('subject')) {
+                
+                if ((cur === 'course' || cur === 'course:' || cur === 'programme' || cur === 'programme:') && lines[i+1]) {
                     const val = lines[i+1];
                     if (!ignoreList.some(ig => val.toLowerCase().includes(ig)) && val.length > 3) crs = val;
                 }
-                if (cur.includes('admission status') && lines[i+1]) {
+                
+                if ((cur === 'admission status' || cur === 'admission status:') && lines[i+1]) {
                     stat = lines[i+1];
                 }
             }
 
-            // Fallback Regex in case the table format is tight
+            // Fallback Regex
             if (!inst) {
                 const iMatch = bodyText.match(/Institution[:\s]+([^\n]+)/i);
                 if (iMatch && !ignoreList.some(ig => iMatch[1].toLowerCase().includes(ig))) inst = iMatch[1].trim();
@@ -168,7 +176,6 @@ app.post('/check-jamb', async (req, res) => {
 
         let capsFound = false;
         
-        // Scan internal frames first (CAPS often drops the result inside an embedded iframe)
         for (const frame of activePage.frames()) {
             try {
                 const fData = await frame.evaluate(extractLogic);
@@ -183,12 +190,11 @@ app.post('/check-jamb', async (req, res) => {
                         }
                     }
                     capsFound = true;
-                    break;
+                    break; // Stop looking once we find the real data in a frame
                 }
             } catch (e) {}
         }
 
-        // Scan main page if frames missed it
         if (!capsFound) {
             const mData = await activePage.evaluate(extractLogic);
             if (mData.inst) candidateData.institution = mData.inst;
