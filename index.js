@@ -64,8 +64,8 @@ app.post('/check-jamb', async (req, res) => {
             return res.json({ success: false, message: "Invalid Email or Password. Please check your credentials." });
         }
 
-        // Wait for dashboard cards to render
-        await new Promise(r => setTimeout(r, 6000));
+        // Give JAMB's dashboard AJAX grid plenty of time to fully render (10 seconds)
+        await new Promise(r => setTimeout(r, 10000));
 
         // 2. Extract Candidate Name and Profile Code from dashboard
         let candidateData = await page.evaluate(() => {
@@ -78,42 +78,49 @@ app.post('/check-jamb', async (req, res) => {
             const pcMatch = bodyText.match(/Profile\s*Code[:\s]*([0-9]+)/i) || bodyText.match(/\b([0-9][A-Z0-9]{9})\b/);
             if (pcMatch) profileCode = pcMatch[1];
 
+            // Collect all card/link texts for debugging
+            const allElements = Array.from(document.querySelectorAll('a, button, .card, .panel, h4, h5'));
+            let dashboardTexts = [];
+            allElements.forEach(el => {
+                const t = el.innerText.trim();
+                if (t.length > 3 && t.length < 50 && !dashboardTexts.includes(t)) {
+                    dashboardTexts.push(t);
+                }
+            });
+
             return { 
                 name, 
                 profileCode, 
                 institution: null, 
                 course: null, 
                 status: null,
-                diagnosticReason: "Direct URL extraction failed."
+                dashboardTexts: dashboardTexts.slice(0, 15)
             };
         });
 
-        // 3. BULLETPROOF NAVIGATION: Extract the exact href of the Admission/CAPS link and navigate directly
+        // 3. SMART NAVIGATION: Find and click the Admission / CAPS card/link
         try {
-            const admissionUrl = await page.evaluate(() => {
-                const anchors = Array.from(document.querySelectorAll('a'));
-                const target = anchors.find(a => {
-                    const txt = a.innerText.trim().toLowerCase();
-                    const href = (a.getAttribute('href') || '').toLowerCase();
-                    return txt.includes('admission') || txt.includes('caps') || href.includes('admission') || href.includes('caps');
+            const navigated = await page.evaluate(() => {
+                const elements = Array.from(document.querySelectorAll('a, button, div, span, h4, h5, .card, .panel'));
+                let target = elements.find(el => {
+                    const txt = el.innerText.trim().toLowerCase();
+                    return txt.includes('check admission status') || txt.includes('admission status') || txt.includes('caps') || txt.includes('admission');
                 });
-                return target ? target.href : null;
+                
+                if (target) {
+                    // If it has an href, navigate to it or click it
+                    if (target.tagName === 'A' && target.href) {
+                        window.location.href = target.href;
+                    } else {
+                        target.click();
+                    }
+                    return true;
+                }
+                return false;
             });
 
-            if (admissionUrl) {
-                await page.goto(admissionUrl, { waitUntil: 'networkidle2', timeout: 30000 });
-                await new Promise(r => setTimeout(r, 4000));
-            } else {
-                // Fallback: click elements if no direct href found
-                await page.evaluate(() => {
-                    const elements = Array.from(document.querySelectorAll('a, div.card, div.panel, button, h4'));
-                    let target = elements.find(el => {
-                        const txt = el.innerText.trim().toLowerCase();
-                        return txt.includes('admission') || txt.includes('caps');
-                    });
-                    if (target) target.click();
-                });
-                await new Promise(r => setTimeout(r, 5000));
+            if (navigated) {
+                await new Promise(r => setTimeout(r, 6000));
             }
         } catch (e) {}
 
@@ -147,9 +154,9 @@ app.post('/check-jamb', async (req, res) => {
             });
         } catch (e) {}
 
-        // 7. Frame-Aware Polling (Up to 25 seconds for slow JAMB servers)
+        // 7. Frame-Aware Polling (Up to 30 seconds for slow JAMB servers)
         let elementFound = false;
-        let attempts = 25;
+        let attempts = 30;
         while (attempts > 0 && !elementFound) {
             for (const frame of activePage.frames()) {
                 try {
@@ -177,22 +184,10 @@ app.post('/check-jamb', async (req, res) => {
             const crs = getElemText('ctl00_MainContent_lblprogramname');
             const stat = getElemText('ctl00_MainContent_lblAdmissionStatus');
 
-            let visibleElements = [];
-            if (!inst) {
-                const items = document.querySelectorAll('a, span, div, h3, h4, th');
-                items.forEach(l => {
-                    const t = l.innerText.trim();
-                    if (t.length > 2 && t.length < 50 && !visibleElements.includes(t)) {
-                        visibleElements.push(t);
-                    }
-                });
-            }
-
-            return { inst, crs, stat, visibleElements: visibleElements.slice(0, 10) };
+            return { inst, crs, stat };
         };
 
         let capsFound = false;
-        let diagnosticDetails = "Element lookup timed out after direct URL navigation.";
 
         for (const frame of activePage.frames()) {
             try {
@@ -203,8 +198,6 @@ app.post('/check-jamb', async (req, res) => {
                     candidateData.status = fData.stat;
                     capsFound = true;
                     break;
-                } else if (fData.visibleElements && fData.visibleElements.length > 0) {
-                    diagnosticDetails = `CAPS frame text: [${fData.visibleElements.join(', ')}]`;
                 }
             } catch (e) {}
         }
@@ -217,13 +210,9 @@ app.post('/check-jamb', async (req, res) => {
                     candidateData.course = mData.crs;
                     candidateData.status = mData.stat;
                     capsFound = true;
-                } else if (mData.visibleElements && mData.visibleElements.length > 0) {
-                    diagnosticDetails = `Active page text: [${mData.visibleElements.join(', ')}]`;
                 }
             } catch (e) {}
         }
-
-        candidateData.diagnosticReason = diagnosticDetails;
 
         // Format clean output for WhatsApp bot
         let finalInstitution = candidateData.institution;
@@ -231,7 +220,7 @@ app.post('/check-jamb', async (req, res) => {
         let finalStatus = candidateData.status;
 
         if (!finalInstitution || finalInstitution === "") {
-            finalInstitution = `⚠️ Not Showing: ${candidateData.diagnosticReason}`;
+            finalInstitution = `⚠️ Not Showing: Dashboard elements found: [${candidateData.dashboardTexts.join(', ')}]`;
         }
         if (!finalCourse || finalCourse === "") {
             finalCourse = "Not Available";
