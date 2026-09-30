@@ -83,7 +83,7 @@ app.post('/check-jamb', async (req, res) => {
                 institution: null, 
                 course: null, 
                 status: null,
-                diagnosticReason: "Page loaded, but admission element timed out."
+                diagnosticReason: "Element lookup timed out across all frames."
             };
         });
 
@@ -110,47 +110,49 @@ app.post('/check-jamb', async (req, res) => {
         const pages = await browser.pages();
         const activePage = pages[pages.length - 1]; 
 
-        // 5. Click the "UTME / DE" Admission Offer link & WAIT FOR THE ELEMENT TO RENDER
+        // 5. Click the "UTME / DE" Admission Offer link
         try {
             await activePage.evaluate(() => {
                 const links = Array.from(document.querySelectorAll('a'));
                 const target = links.find(l => (l.href && l.href.includes('candidateadmission.aspx')) || l.innerText.trim().toLowerCase().includes('utme / de'));
                 if (target) target.click();
             });
+        } catch (e) {}
 
-            // Dynamically wait until ASP.NET renders the institution ID label on the page
-            await activePage.waitForSelector('#ctl00_MainContent_lblinstName', { timeout: 15000 });
-        } catch (e) {
-            console.log("Postback wait timeout:", e.message);
+        // 6. FRAME-AWARE POLLING: Scan all frames repeatedly for up to 15 seconds until the ID appears
+        let elementFound = false;
+        let attempts = 15;
+        while (attempts > 0 && !elementFound) {
+            for (const frame of activePage.frames()) {
+                try {
+                    const el = await frame.$('#ctl00_MainContent_lblinstName');
+                    if (el) {
+                        elementFound = true;
+                        break;
+                    }
+                } catch (e) {}
+            }
+            if (!elementFound) {
+                await new Promise(r => setTimeout(r, 1000));
+                attempts--;
+            }
         }
 
-        // 6. EXTRACT DATA DIRECTLY BY ID
+        // 7. EXTRACT DATA DIRECTLY BY ID FROM THE CORRECT FRAME
         const extractData = () => {
             const getElemText = (id) => {
                 const el = document.getElementById(id);
                 return el ? el.innerText.trim() : null;
             };
 
-            const inst = getElemText('ctl00_MainContent_lblinstName');
-            const crs = getElemText('ctl00_MainContent_lblprogramname');
-            const stat = getElemText('ctl00_MainContent_lblAdmissionStatus');
-
-            const pageText = document.body ? document.body.innerText.replace(/\s+/g, ' ').trim() : "";
-            let diagnosticReason = "Successful extraction.";
-            if (!inst) {
-                if (pageText.includes("Session Expired") || pageText.includes("Log In")) {
-                    diagnosticReason = "Session expired or redirected back to login.";
-                } else {
-                    diagnosticReason = "Institution element IDs not found in DOM after postback.";
-                }
-            }
-
-            return { inst, crs, stat, diagnosticReason };
+            return {
+                inst: getElemText('ctl00_MainContent_lblinstName'),
+                crs: getElemText('ctl00_MainContent_lblprogramname'),
+                stat: getElemText('ctl00_MainContent_lblAdmissionStatus')
+            };
         };
 
         let capsFound = false;
-
-        // Check inside frames
         for (const frame of activePage.frames()) {
             try {
                 const fData = await frame.evaluate(extractData);
@@ -158,23 +160,25 @@ app.post('/check-jamb', async (req, res) => {
                     candidateData.institution = fData.inst;
                     candidateData.course = fData.crs;
                     candidateData.status = fData.stat;
-                    candidateData.diagnosticReason = fData.diagnosticReason;
+                    candidateData.diagnosticReason = "Successful extraction.";
                     capsFound = true;
                     break;
                 }
             } catch (e) {}
         }
 
-        // Check main active page if frames didn't match
+        // Fallback to main page if frames didn't catch it
         if (!capsFound) {
             const mData = await activePage.evaluate(extractData);
-            candidateData.institution = mData.inst;
-            candidateData.course = mData.crs;
-            candidateData.status = mData.stat;
-            candidateData.diagnosticReason = mData.diagnosticReason;
+            if (mData.inst) {
+                candidateData.institution = mData.inst;
+                candidateData.course = mData.crs;
+                candidateData.status = mData.stat;
+                candidateData.diagnosticReason = "Successful extraction.";
+            }
         }
 
-        // Format clean output for WhatsApp
+        // Format clean output for WhatsApp bot
         let finalInstitution = candidateData.institution;
         let finalCourse = candidateData.course;
         let finalStatus = candidateData.status;
