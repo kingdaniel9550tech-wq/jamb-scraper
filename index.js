@@ -64,7 +64,7 @@ app.post('/check-jamb', async (req, res) => {
             return res.json({ success: false, message: "Invalid Email or Password. Please check your credentials." });
         }
 
-        // Wait for dashboard cards to fully load and render via AJAX
+        // Wait for dashboard elements to fully render
         await new Promise(r => setTimeout(r, 6000));
 
         // 2. Extract Candidate Name and Profile Code from dashboard
@@ -84,38 +84,38 @@ app.post('/check-jamb', async (req, res) => {
                 institution: null, 
                 course: null, 
                 status: null,
-                diagnosticReason: "Dashboard grid tile click failed."
+                diagnosticReason: "Dashboard card click failed."
             };
         });
 
-        // 3. SMART NAVIGATION: Scroll down and click the "Check Admission Status" dashboard card
+        // 3. SMART NAVIGATION: Scroll down and click the main dashboard card, avoiding sidebar navs
         try {
             await page.evaluate(async () => {
-                // Scroll down to load all grid cards
-                window.scrollTo(0, 500);
+                window.scrollTo(0, 400);
                 await new Promise(resolve => setTimeout(resolve, 2000));
 
-                const elements = Array.from(document.querySelectorAll('a, button, div, span, h4, p, li, .card, .panel'));
+                // Gather all clickable cards or elements in the main body area
+                const elements = Array.from(document.querySelectorAll('a, div.card, div.panel, button, h4, h5, .service-card'));
+                
+                // Find one that mentions admission status but is NOT inside a sidebar or nav
                 let target = elements.find(el => {
                     const txt = el.innerText.trim().toLowerCase();
-                    return txt.includes('check admission status') || txt.includes('admission status') || txt === 'caps';
+                    const isNav = el.closest('nav') || el.closest('aside') || el.closest('.sidebar') || el.closest('.menu');
+                    return (txt.includes('check admission status') || txt.includes('admission status') || txt.includes('caps')) && !isNav;
                 });
                 
                 if (target) {
                     target.click();
                 } else {
-                    // Fallback search across all clickable links
-                    let linkTarget = elements.find(el => {
-                        const href = el.getAttribute('href') || '';
-                        return href.toLowerCase().includes('admission') || href.toLowerCase().includes('caps');
-                    });
-                    if (linkTarget) linkTarget.click();
+                    // Broader fallback search for any element containing admission
+                    let fallback = elements.find(el => el.innerText.trim().toLowerCase().includes('admission'));
+                    if (fallback) fallback.click();
                 }
             });
             await new Promise(r => setTimeout(r, 5000));
         } catch (e) {}
 
-        // 4. Click "Access My CAPS" if it appears on the sub-page
+        // 4. Click "Access My CAPS" if prompted on the secondary page
         try {
             await page.evaluate(() => {
                 const els = Array.from(document.querySelectorAll('a, button, div, span, h4, p, li'));
@@ -145,7 +145,7 @@ app.post('/check-jamb', async (req, res) => {
             });
         } catch (e) {}
 
-        // 7. Extended Frame-Aware Polling (Up to 25 seconds for slow JAMB servers)
+        // 7. Frame-Aware Polling (Up to 25 seconds for slow JAMB servers)
         let elementFound = false;
         let attempts = 25;
         while (attempts > 0 && !elementFound) {
@@ -186,11 +186,11 @@ app.post('/check-jamb', async (req, res) => {
                 });
             }
 
-            return { inst, crs, stat, visibleElements: visibleElements.slice(0, 12) };
+            return { inst, crs, stat, visibleElements: visibleElements.slice(0, 10) };
         };
 
         let capsFound = false;
-        let diagnosticDetails = "Element lookup timed out after scrolling dashboard grid.";
+        let diagnosticDetails = "Element lookup timed out after filtering sidebar.";
 
         for (const frame of activePage.frames()) {
             try {
