@@ -151,7 +151,7 @@ app.post('/check-jamb', async (req, res) => {
                 }
 
                 // Look for "Course :"
-                if (/^course\s*:?$/i.test(text) \vert{}\vert{} /^programme\s*:?$/i.test(text)) {
+                if (/^course\s*:?$/i.test(text) || /^programme\s*:?$/i.test(text)) {
                     if (el.nextElementSibling && el.nextElementSibling.innerText) {
                         crs = el.nextElementSibling.innerText.trim();
                     }
