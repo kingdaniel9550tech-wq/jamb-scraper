@@ -66,7 +66,7 @@ app.post('/check-jamb', async (req, res) => {
 
         await new Promise(r => setTimeout(r, 4000));
 
-        // 2. Extract Candidate Name and Profile Code from dashboard
+        // 2. Extract Candidate Name and Profile Code
         let candidateData = await page.evaluate(() => {
             const bodyText = document.body.innerText || "";
             let name = "Verified Candidate";
@@ -80,9 +80,10 @@ app.post('/check-jamb', async (req, res) => {
             return { 
                 name, 
                 profileCode, 
-                institution: "Not Yet Loaded in CAPS", 
-                course: "Not Yet Loaded in CAPS", 
-                status: "⏳ Admission in Progress / Not Admitted Yet" 
+                institution: null, 
+                course: null, 
+                status: null,
+                diagnosticReason: "Page loaded, but admission details element was not found."
             };
         });
 
@@ -109,7 +110,7 @@ app.post('/check-jamb', async (req, res) => {
         const pages = await browser.pages();
         const activePage = pages[pages.length - 1]; 
 
-        // 5. DIRECTLY CLICK THE "UTME / DE" ADMISSION OFFER LINK (`candidateadmission.aspx`)
+        // 5. Click the "UTME / DE" Admission Offer link
         try {
             await activePage.evaluate(() => {
                 const links = Array.from(document.querySelectorAll('a'));
@@ -119,40 +120,45 @@ app.post('/check-jamb', async (req, res) => {
             await new Promise(r => setTimeout(r, 8000)); 
         } catch (e) {}
 
-        // 6. EXACT ID EXTRACTION FROM candidateadmission.aspx
-        const extractByIDs = () => {
+        // 6. EXTRACT DATA & CAPTURE PAGE DIAGNOSTICS IF EMPTY
+        const extractWithDiagnostics = () => {
             const getElemText = (id) => {
                 const el = document.getElementById(id);
                 return el ? el.innerText.trim() : null;
             };
 
-            return {
-                inst: getElemText('ctl00_MainContent_lblinstName'),
-                crs: getElemText('ctl00_MainContent_lblprogramname'),
-                stat: getElemText('ctl00_MainContent_lblAdmissionStatus'),
-                pageTextSample: document.body.innerText.substring(0, 300) // For debugging if empty
-            };
+            const inst = getElemText('ctl00_MainContent_lblinstName');
+            const crs = getElemText('ctl00_MainContent_lblprogramname');
+            const stat = getElemText('ctl00_MainContent_lblAdmissionStatus');
+
+            // Grab a clean snippet of the page text for diagnosis if fields are blank
+            const pageText = document.body ? document.body.innerText.replace(/\s+/g, ' ').trim() : "";
+            
+            let diagnosticReason = "Successful extraction.";
+            if (!inst) {
+                if (pageText.includes("Session Expired") || pageText.includes("Log In")) {
+                    diagnosticReason = "Session expired or redirected back to login.";
+                } else if (pageText.length < 100) {
+                    diagnosticReason = "Target page returned empty or blank response.";
+                } else {
+                    diagnosticReason = "Institution element IDs not found on current view (Check if admission page rendered fully).";
+                }
+            }
+
+            return { inst, crs, stat, diagnosticReason, pageSnippet: pageText.substring(0, 150) };
         };
 
         let capsFound = false;
 
-        // Check inside all frames
+        // Check inside frames
         for (const frame of activePage.frames()) {
             try {
-                const fData = await frame.evaluate(extractByIDs);
-                if (fData.inst || fData.crs || fData.stat) {
-                    if (fData.inst) candidateData.institution = fData.inst;
-                    if (fData.crs) candidateData.course = fData.crs;
-                    if (fData.stat) {
-                        const upperStat = fData.stat.toUpperCase();
-                        if (upperStat.includes("ADMITTED") && !upperStat.includes("NOT")) {
-                            candidateData.status = "🎉 ADMISSION OFFERED / APPROVED";
-                        } else if (upperStat.includes("NOT")) {
-                            candidateData.status = "❌ NOT ADMITTED YET";
-                        } else {
-                            candidateData.status = fData.stat;
-                        }
-                    }
+                const fData = await frame.evaluate(extractWithDiagnostics);
+                if (fData.inst || fData.crs) {
+                    candidateData.institution = fData.inst;
+                    candidateData.course = fData.crs;
+                    candidateData.status = fData.stat;
+                    candidateData.diagnosticReason = fData.diagnosticReason;
                     capsFound = true;
                     break;
                 }
@@ -161,26 +167,41 @@ app.post('/check-jamb', async (req, res) => {
 
         // Check main active page if frames didn't match
         if (!capsFound) {
-            const mData = await activePage.evaluate(extractByIDs);
-            if (mData.inst) candidateData.institution = mData.inst;
-            if (mData.crs) candidateData.course = mData.crs;
-            if (mData.stat) {
-                const upperStat = mData.stat.toUpperCase();
-                if (upperStat.includes("ADMITTED") && !upperStat.includes("NOT")) {
-                    candidateData.status = "🎉 ADMISSION OFFERED / APPROVED";
-                } else if (upperStat.includes("NOT")) {
-                    candidateData.status = "❌ NOT ADMITTED YET";
-                } else {
-                    candidateData.status = mData.stat;
-                }
-            } else if (mData.pageTextSample) {
-                // If elements are missing, let's include a snippet of what page it landed on
-                console.log("Debug Page Text:", mData.pageTextSample);
+            const mData = await activePage.evaluate(extractWithDiagnostics);
+            candidateData.institution = mData.inst;
+            candidateData.course = mData.crs;
+            candidateData.status = mData.stat;
+            candidateData.diagnosticReason = mData.diagnosticReason;
+        }
+
+        // Format final clean output for WhatsApp bot
+        let finalInstitution = candidateData.institution;
+        let finalCourse = candidateData.course;
+        let finalStatus = candidateData.status;
+
+        if (!finalInstitution || finalInstitution === "") {
+            finalInstitution = `⚠️ Not Showing: ${candidateData.diagnosticReason}`;
+        }
+        if (!finalCourse || finalCourse === "") {
+            finalCourse = "Not Available";
+        }
+        if (!finalStatus || finalStatus === "") {
+            finalStatus = "⏳ Admission in Progress / Not Admitted Yet";
+        } else {
+            const upperStat = finalStatus.toUpperCase();
+            if (upperStat.includes("ADMITTED") && !upperStat.includes("NOT")) {
+                finalStatus = "🎉 ADMISSION OFFERED / APPROVED";
+            } else if (upperStat.includes("NOT")) {
+                finalStatus = "❌ NOT ADMITTED YET";
             }
         }
 
+        candidateData.institution = finalInstitution;
+        candidateData.course = finalCourse;
+        candidateData.status = finalStatus;
+
         await browser.close();
-        return res.json({ success: true, data: candidateData, message: "Successfully fetched all details." });
+        return res.json({ success: true, data: candidateData, message: "Successfully executed check." });
 
     } catch (error) {
         if (browser) await browser.close();
