@@ -83,7 +83,7 @@ app.post('/check-jamb', async (req, res) => {
                 institution: null, 
                 course: null, 
                 status: null,
-                diagnosticReason: "Page loaded, but admission details element was not found."
+                diagnosticReason: "Page loaded, but admission element timed out."
             };
         });
 
@@ -110,18 +110,22 @@ app.post('/check-jamb', async (req, res) => {
         const pages = await browser.pages();
         const activePage = pages[pages.length - 1]; 
 
-        // 5. Click the "UTME / DE" Admission Offer link
+        // 5. Click the "UTME / DE" Admission Offer link & WAIT FOR THE ELEMENT TO RENDER
         try {
             await activePage.evaluate(() => {
                 const links = Array.from(document.querySelectorAll('a'));
                 const target = links.find(l => (l.href && l.href.includes('candidateadmission.aspx')) || l.innerText.trim().toLowerCase().includes('utme / de'));
                 if (target) target.click();
             });
-            await new Promise(r => setTimeout(r, 8000)); 
-        } catch (e) {}
 
-        // 6. EXTRACT DATA & CAPTURE PAGE DIAGNOSTICS IF EMPTY
-        const extractWithDiagnostics = () => {
+            // Dynamically wait until ASP.NET renders the institution ID label on the page
+            await activePage.waitForSelector('#ctl00_MainContent_lblinstName', { timeout: 15000 });
+        } catch (e) {
+            console.log("Postback wait timeout:", e.message);
+        }
+
+        // 6. EXTRACT DATA DIRECTLY BY ID
+        const extractData = () => {
             const getElemText = (id) => {
                 const el = document.getElementById(id);
                 return el ? el.innerText.trim() : null;
@@ -131,21 +135,17 @@ app.post('/check-jamb', async (req, res) => {
             const crs = getElemText('ctl00_MainContent_lblprogramname');
             const stat = getElemText('ctl00_MainContent_lblAdmissionStatus');
 
-            // Grab a clean snippet of the page text for diagnosis if fields are blank
             const pageText = document.body ? document.body.innerText.replace(/\s+/g, ' ').trim() : "";
-            
             let diagnosticReason = "Successful extraction.";
             if (!inst) {
                 if (pageText.includes("Session Expired") || pageText.includes("Log In")) {
                     diagnosticReason = "Session expired or redirected back to login.";
-                } else if (pageText.length < 100) {
-                    diagnosticReason = "Target page returned empty or blank response.";
                 } else {
-                    diagnosticReason = "Institution element IDs not found on current view (Check if admission page rendered fully).";
+                    diagnosticReason = "Institution element IDs not found in DOM after postback.";
                 }
             }
 
-            return { inst, crs, stat, diagnosticReason, pageSnippet: pageText.substring(0, 150) };
+            return { inst, crs, stat, diagnosticReason };
         };
 
         let capsFound = false;
@@ -153,7 +153,7 @@ app.post('/check-jamb', async (req, res) => {
         // Check inside frames
         for (const frame of activePage.frames()) {
             try {
-                const fData = await frame.evaluate(extractWithDiagnostics);
+                const fData = await frame.evaluate(extractData);
                 if (fData.inst || fData.crs) {
                     candidateData.institution = fData.inst;
                     candidateData.course = fData.crs;
@@ -167,14 +167,14 @@ app.post('/check-jamb', async (req, res) => {
 
         // Check main active page if frames didn't match
         if (!capsFound) {
-            const mData = await activePage.evaluate(extractWithDiagnostics);
+            const mData = await activePage.evaluate(extractData);
             candidateData.institution = mData.inst;
             candidateData.course = mData.crs;
             candidateData.status = mData.stat;
             candidateData.diagnosticReason = mData.diagnosticReason;
         }
 
-        // Format final clean output for WhatsApp bot
+        // Format clean output for WhatsApp
         let finalInstitution = candidateData.institution;
         let finalCourse = candidateData.course;
         let finalStatus = candidateData.status;
