@@ -66,7 +66,7 @@ app.post('/check-jamb', async (req, res) => {
 
         await new Promise(r => setTimeout(r, 4000));
 
-        // 2. Extract Candidate Name and Profile Code
+        // 2. Extract Candidate Name and Profile Code from dashboard
         let candidateData = await page.evaluate(() => {
             const bodyText = document.body.innerText || "";
             let name = "Verified Candidate";
@@ -83,7 +83,7 @@ app.post('/check-jamb', async (req, res) => {
                 institution: null, 
                 course: null, 
                 status: null,
-                diagnosticReason: "Element lookup timed out across all frames."
+                diagnosticReason: "Navigation timed out."
             };
         });
 
@@ -94,7 +94,7 @@ app.post('/check-jamb', async (req, res) => {
                 const target = els.find(el => el.innerText.trim().toLowerCase().includes('check admission status'));
                 if (target) target.click();
             });
-            await new Promise(r => setTimeout(r, 4000));
+            await new Promise(r => setTimeout(r, 5000));
         } catch (e) {}
 
         try {
@@ -103,25 +103,29 @@ app.post('/check-jamb', async (req, res) => {
                 const target = els.find(el => el.innerText.trim().toLowerCase().includes('access my caps'));
                 if (target) target.click();
             });
-            await new Promise(r => setTimeout(r, 6000)); 
+            await new Promise(r => setTimeout(r, 7000)); 
         } catch (e) {}
 
         // 4. Switch to the CAPS tab
         const pages = await browser.pages();
         const activePage = pages[pages.length - 1]; 
 
-        // 5. Click the "UTME / DE" Admission Offer link
+        // 5. Broadened click for Admission page/link
         try {
             await activePage.evaluate(() => {
-                const links = Array.from(document.querySelectorAll('a'));
-                const target = links.find(l => (l.href && l.href.includes('candidateadmission.aspx')) || l.innerText.trim().toLowerCase().includes('utme / de'));
+                const allEls = Array.from(document.querySelectorAll('a, button, div, span, h4, p, li'));
+                const target = allEls.find(el => {
+                    const txt = el.innerText.trim().toLowerCase();
+                    const href = el.getAttribute('href') || '';
+                    return href.includes('candidateadmission') || txt.includes('utme / de') || txt.includes('admission status') || txt.includes('caps home');
+                });
                 if (target) target.click();
             });
         } catch (e) {}
 
-        // 6. FRAME-AWARE POLLING: Scan all frames repeatedly for up to 15 seconds until the ID appears
+        // 6. Extended Frame-Aware Polling (Up to 25 seconds for slow JAMB servers)
         let elementFound = false;
-        let attempts = 15;
+        let attempts = 25;
         while (attempts > 0 && !elementFound) {
             for (const frame of activePage.frames()) {
                 try {
@@ -138,21 +142,35 @@ app.post('/check-jamb', async (req, res) => {
             }
         }
 
-        // 7. EXTRACT DATA DIRECTLY BY ID FROM THE CORRECT FRAME
+        // 7. Extract data or capture available page text for diagnostics if failed
         const extractData = () => {
             const getElemText = (id) => {
                 const el = document.getElementById(id);
                 return el ? el.innerText.trim() : null;
             };
 
-            return {
-                inst: getElemText('ctl00_MainContent_lblinstName'),
-                crs: getElemText('ctl00_MainContent_lblprogramname'),
-                stat: getElemText('ctl00_MainContent_lblAdmissionStatus')
-            };
+            const inst = getElemText('ctl00_MainContent_lblinstName');
+            const crs = getElemText('ctl00_MainContent_lblprogramname');
+            const stat = getElemText('ctl00_MainContent_lblAdmissionStatus');
+
+            // Collect available links/buttons if fields are missing to help diagnose
+            let visibleLinks = [];
+            if (!inst) {
+                const links = document.querySelectorAll('a, span, div');
+                links.forEach(l => {
+                    const t = l.innerText.trim();
+                    if (t.length > 2 && t.length < 40 && !visibleLinks.includes(t)) {
+                        visibleLinks.push(t);
+                    }
+                });
+            }
+
+            return { inst, crs, stat, visibleLinks: visibleLinks.slice(0, 10) };
         };
 
         let capsFound = false;
+        let diagnosticDetails = "Element lookup timed out across all frames.";
+
         for (const frame of activePage.frames()) {
             try {
                 const fData = await frame.evaluate(extractData);
@@ -160,23 +178,29 @@ app.post('/check-jamb', async (req, res) => {
                     candidateData.institution = fData.inst;
                     candidateData.course = fData.crs;
                     candidateData.status = fData.stat;
-                    candidateData.diagnosticReason = "Successful extraction.";
                     capsFound = true;
                     break;
+                } else if (fData.visibleLinks && fData.visibleLinks.length > 0) {
+                    diagnosticDetails = `Found page text: [${fData.visibleLinks.join(', ')}]`;
                 }
             } catch (e) {}
         }
 
-        // Fallback to main page if frames didn't catch it
         if (!capsFound) {
-            const mData = await activePage.evaluate(extractData);
-            if (mData.inst) {
-                candidateData.institution = mData.inst;
-                candidateData.course = mData.crs;
-                candidateData.status = mData.stat;
-                candidateData.diagnosticReason = "Successful extraction.";
-            }
+            try {
+                const mData = await activePage.evaluate(extractData);
+                if (mData.inst) {
+                    candidateData.institution = mData.inst;
+                    candidateData.course = mData.crs;
+                    candidateData.status = mData.stat;
+                    capsFound = true;
+                } else if (mData.visibleLinks && mData.visibleLinks.length > 0) {
+                    diagnosticDetails = `Main page text: [${mData.visibleLinks.join(', ')}]`;
+                }
+            } catch (e) {}
         }
+
+        candidateData.diagnosticReason = diagnosticDetails;
 
         // Format clean output for WhatsApp bot
         let finalInstitution = candidateData.institution;
