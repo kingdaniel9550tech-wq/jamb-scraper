@@ -64,7 +64,7 @@ app.post('/check-jamb', async (req, res) => {
             return res.json({ success: false, message: "Invalid Email or Password. Please check your credentials." });
         }
 
-        // Wait for dashboard elements to fully render
+        // Wait for dashboard cards to render
         await new Promise(r => setTimeout(r, 6000));
 
         // 2. Extract Candidate Name and Profile Code from dashboard
@@ -84,35 +84,37 @@ app.post('/check-jamb', async (req, res) => {
                 institution: null, 
                 course: null, 
                 status: null,
-                diagnosticReason: "Dashboard card click failed."
+                diagnosticReason: "Direct URL extraction failed."
             };
         });
 
-        // 3. SMART NAVIGATION: Scroll down and click the main dashboard card, avoiding sidebar navs
+        // 3. BULLETPROOF NAVIGATION: Extract the exact href of the Admission/CAPS link and navigate directly
         try {
-            await page.evaluate(async () => {
-                window.scrollTo(0, 400);
-                await new Promise(resolve => setTimeout(resolve, 2000));
-
-                // Gather all clickable cards or elements in the main body area
-                const elements = Array.from(document.querySelectorAll('a, div.card, div.panel, button, h4, h5, .service-card'));
-                
-                // Find one that mentions admission status but is NOT inside a sidebar or nav
-                let target = elements.find(el => {
-                    const txt = el.innerText.trim().toLowerCase();
-                    const isNav = el.closest('nav') || el.closest('aside') || el.closest('.sidebar') || el.closest('.menu');
-                    return (txt.includes('check admission status') || txt.includes('admission status') || txt.includes('caps')) && !isNav;
+            const admissionUrl = await page.evaluate(() => {
+                const anchors = Array.from(document.querySelectorAll('a'));
+                const target = anchors.find(a => {
+                    const txt = a.innerText.trim().toLowerCase();
+                    const href = (a.getAttribute('href') || '').toLowerCase();
+                    return txt.includes('admission') || txt.includes('caps') || href.includes('admission') || href.includes('caps');
                 });
-                
-                if (target) {
-                    target.click();
-                } else {
-                    // Broader fallback search for any element containing admission
-                    let fallback = elements.find(el => el.innerText.trim().toLowerCase().includes('admission'));
-                    if (fallback) fallback.click();
-                }
+                return target ? target.href : null;
             });
-            await new Promise(r => setTimeout(r, 5000));
+
+            if (admissionUrl) {
+                await page.goto(admissionUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+                await new Promise(r => setTimeout(r, 4000));
+            } else {
+                // Fallback: click elements if no direct href found
+                await page.evaluate(() => {
+                    const elements = Array.from(document.querySelectorAll('a, div.card, div.panel, button, h4'));
+                    let target = elements.find(el => {
+                        const txt = el.innerText.trim().toLowerCase();
+                        return txt.includes('admission') || txt.includes('caps');
+                    });
+                    if (target) target.click();
+                });
+                await new Promise(r => setTimeout(r, 5000));
+            }
         } catch (e) {}
 
         // 4. Click "Access My CAPS" if prompted on the secondary page
@@ -128,11 +130,11 @@ app.post('/check-jamb', async (req, res) => {
             await new Promise(r => setTimeout(r, 6000)); 
         } catch (e) {}
 
-        // 5. Switch to the CAPS tab/page
+        // 5. Switch to the CAPS tab/page if a new tab opened
         const pages = await browser.pages();
         const activePage = pages[pages.length - 1]; 
 
-        // 6. Click the "UTME / DE" Admission Offer link on CAPS
+        // 6. Click the "UTME / DE" Admission Offer link on CAPS if needed
         try {
             await activePage.evaluate(() => {
                 const links = Array.from(document.querySelectorAll('a, div, span, button'));
@@ -190,7 +192,7 @@ app.post('/check-jamb', async (req, res) => {
         };
 
         let capsFound = false;
-        let diagnosticDetails = "Element lookup timed out after filtering sidebar.";
+        let diagnosticDetails = "Element lookup timed out after direct URL navigation.";
 
         for (const frame of activePage.frames()) {
             try {
