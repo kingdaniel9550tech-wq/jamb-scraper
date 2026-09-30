@@ -46,7 +46,7 @@ app.post('/check-jamb', async (req, res) => {
         const page = await browser.newPage();
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
 
-        // 1. Navigate & Login to JAMB e-facility
+        // 1. Login
         await page.goto('https://efacility.jamb.gov.ng/', { waitUntil: 'networkidle2', timeout: 45000 });
 
         await page.waitForSelector('input#email, input#Email', { timeout: 15000 });
@@ -66,7 +66,7 @@ app.post('/check-jamb', async (req, res) => {
 
         await new Promise(r => setTimeout(r, 4000));
 
-        // 2. Extract Candidate Name and Profile Code
+        // 2. Candidate Info from main dashboard
         let candidateData = await page.evaluate(() => {
             const bodyText = document.body.innerText || "";
             let name = "Verified Candidate";
@@ -86,7 +86,7 @@ app.post('/check-jamb', async (req, res) => {
             };
         });
 
-        // 3. Click "Check Admission Status"
+        // 3. Navigate to CAPS
         try {
             await page.evaluate(() => {
                 const els = Array.from(document.querySelectorAll('a, button, div, span, h4, p'));
@@ -96,7 +96,6 @@ app.post('/check-jamb', async (req, res) => {
             await new Promise(r => setTimeout(r, 4000));
         } catch (e) {}
 
-        // 4. Click "Access My CAPS" (Spawns New Tab)
         try {
             await page.evaluate(() => {
                 const els = Array.from(document.querySelectorAll('a, button, div, span, h4, p'));
@@ -106,11 +105,9 @@ app.post('/check-jamb', async (req, res) => {
             await new Promise(r => setTimeout(r, 6000)); 
         } catch (e) {}
 
-        // 5. Switch to the new CAPS tab
         const pages = await browser.pages();
         const activePage = pages[pages.length - 1]; 
 
-        // 6. Click "Admission Status" on the left menu
         try {
             await activePage.evaluate(() => {
                 const els = Array.from(document.querySelectorAll('a, button, div, span, h4, p, li'));
@@ -123,80 +120,94 @@ app.post('/check-jamb', async (req, res) => {
             await new Promise(r => setTimeout(r, 8000)); 
         } catch (e) {}
 
-        // 7. ULTRA-AGGRESSIVE DATA EXTRACTION
+        // 4. PRECISE DOM EXTRACTION
         const extractLogic = () => {
-            const bodyText = document.body.innerText || "";
-            const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-
             let inst = null;
             let crs = null;
             let stat = null;
-            
-            // Ignore list for sidebar junk
-            const ignoreList = [
-                "application for", "correction", "condonement", "change of", 
-                "downward", "not yet loaded", "transferred", "transfer", 
-                "approval", "caps", "dashboard", "print", "status"
-            ];
 
-            const cleanValue = (val) => {
-                if (!val) return null;
-                const lower = val.toLowerCase();
-                if (ignoreList.some(ig => lower.includes(ig))) return null;
-                if (val.length < 4) return null;
-                return val;
-            };
+            // Search all elements on the page
+            const allElements = Array.from(document.querySelectorAll('*'));
 
-            for (let i = 0; i < lines.length; i++) {
-                const cur = lines[i].toLowerCase();
-                const originalLine = lines[i];
-                
-                // --- PARSE INSTITUTION ---
-                if (cur.includes('institution') && !cur.includes('transferred')) {
-                    // Check if they are on the SAME line (e.g., "Institution: University of Lagos")
-                    const splitVal = originalLine.split(/institution[\s:]+/i);
-                    if (splitVal.length > 1 && splitVal[1].trim().length > 3) {
-                        inst = cleanValue(splitVal[1].trim());
-                    } 
-                    // Otherwise, check the NEXT line
-                    else if (lines[i+1]) {
-                        inst = cleanValue(lines[i+1]);
+            for (const el of allElements) {
+                const text = el.innerText ? el.innerText.trim() : "";
+
+                // Look for element whose immediate text is "Institution:" or starts with "Institution"
+                if (/^institution\s*:?$/i.test(text)) {
+                    // Try next element sibling
+                    if (el.nextElementSibling && el.nextElementSibling.innerText) {
+                        const val = el.nextElementSibling.innerText.trim();
+                        if (val && !val.toLowerCase().includes('transferred')) inst = val;
+                    }
+                    // Or check parent/sibling structure
+                    if (!inst && el.parentElement) {
+                        const siblings = Array.from(el.parentElement.children);
+                        const idx = siblings.indexOf(el);
+                        if (idx !== -1 && siblings[idx + 1]) {
+                            const val = siblings[idx + 1].innerText.trim();
+                            if (val && !val.toLowerCase().includes('transferred')) inst = val;
+                        }
                     }
                 }
-                
-                // --- PARSE COURSE ---
-                if ((cur.includes('course') || cur.includes('programme')) && !cur.includes('subject')) {
-                    const splitVal = originalLine.split(/(?:course|programme)[\s:]+/i);
-                    if (splitVal.length > 1 && splitVal[1].trim().length > 3) {
-                        crs = cleanValue(splitVal[1].trim());
+
+                // Look for "Course :"
+                if (/^course\s*:?$/i.test(text) \vert{}\vert{} /^programme\s*:?$/i.test(text)) {
+                    if (el.nextElementSibling && el.nextElementSibling.innerText) {
+                        crs = el.nextElementSibling.innerText.trim();
                     }
-                    else if (lines[i+1]) {
-                        crs = cleanValue(lines[i+1]);
+                    if (!crs && el.parentElement) {
+                        const siblings = Array.from(el.parentElement.children);
+                        const idx = siblings.indexOf(el);
+                        if (idx !== -1 && siblings[idx + 1]) {
+                            crs = siblings[idx + 1].innerText.trim();
+                        }
                     }
                 }
-                
-                // --- PARSE STATUS ---
-                if (cur.includes('admission status') && !cur.includes('regular')) {
-                    const splitVal = originalLine.split(/admission status[\s:]+/i);
-                    if (splitVal.length > 1 && splitVal[1].trim().length > 3) {
-                        stat = splitVal[1].trim();
+
+                // Look for "Admission Status:"
+                if (/^admission status\s*:?$/i.test(text)) {
+                    if (el.nextElementSibling && el.nextElementSibling.innerText) {
+                        stat = el.nextElementSibling.innerText.trim();
                     }
-                    else if (lines[i+1]) {
-                        stat = lines[i+1];
+                    if (!stat && el.parentElement) {
+                        const siblings = Array.from(el.parentElement.children);
+                        const idx = siblings.indexOf(el);
+                        if (idx !== -1 && siblings[idx + 1]) {
+                            stat = siblings[idx + 1].innerText.trim();
+                        }
                     }
                 }
             }
 
-            return { 
-                inst, 
-                crs, 
-                stat: stat || (bodyText.includes("NOT ADMITTED") ? "NOT ADMITTED" : (bodyText.includes("ADMITTED") ? "ADMITTED" : ""))
-            };
+            // Fallback: Exact plain-text line scanning
+            if (!inst || !crs) {
+                const lines = (document.body.innerText || "").split('\n').map(l => l.trim()).filter(Boolean);
+                for (let i = 0; i < lines.length; i++) {
+                    const line = lines[i].toLowerCase();
+                    if (line === 'institution:' || line === 'institution') {
+                        if (lines[i + 1] && !lines[i + 1].toLowerCase().includes('transferred')) {
+                            if (!inst) inst = lines[i + 1];
+                        }
+                    }
+                    if (line === 'course:' || line === 'course' || line === 'programme:' || line === 'programme') {
+                        if (lines[i + 1]) {
+                            if (!crs) crs = lines[i + 1];
+                        }
+                    }
+                    if (line === 'admission status:' || line === 'admission status') {
+                        if (lines[i + 1]) {
+                            if (!stat) stat = lines[i + 1];
+                        }
+                    }
+                }
+            }
+
+            return { inst, crs, stat };
         };
 
         let capsFound = false;
-        
-        // Scan inside iframes first
+
+        // Scan frames
         for (const frame of activePage.frames()) {
             try {
                 const fData = await frame.evaluate(extractLogic);
@@ -204,28 +215,34 @@ app.post('/check-jamb', async (req, res) => {
                     if (fData.inst) candidateData.institution = fData.inst;
                     if (fData.crs) candidateData.course = fData.crs;
                     if (fData.stat) {
-                        if (fData.stat.toUpperCase().includes("ADMITTED") && !fData.stat.toUpperCase().includes("NOT")) {
+                        const upperStat = fData.stat.toUpperCase();
+                        if (upperStat.includes("ADMITTED") && !upperStat.includes("NOT")) {
                             candidateData.status = "🎉 ADMISSION OFFERED / APPROVED";
-                        } else if (fData.stat.toUpperCase().includes("NOT")) {
+                        } else if (upperStat.includes("NOT")) {
                             candidateData.status = "❌ NOT ADMITTED YET";
+                        } else {
+                            candidateData.status = fData.stat;
                         }
                     }
                     capsFound = true;
-                    break; 
+                    break;
                 }
             } catch (e) {}
         }
 
-        // Scan main page if iframes didn't have it
+        // Scan main active page if frame didn't yield values
         if (!capsFound) {
             const mData = await activePage.evaluate(extractLogic);
             if (mData.inst) candidateData.institution = mData.inst;
             if (mData.crs) candidateData.course = mData.crs;
             if (mData.stat) {
-                if (mData.stat.toUpperCase().includes("ADMITTED") && !mData.stat.toUpperCase().includes("NOT")) {
+                const upperStat = mData.stat.toUpperCase();
+                if (upperStat.includes("ADMITTED") && !upperStat.includes("NOT")) {
                     candidateData.status = "🎉 ADMISSION OFFERED / APPROVED";
-                } else if (mData.stat.toUpperCase().includes("NOT")) {
+                } else if (upperStat.includes("NOT")) {
                     candidateData.status = "❌ NOT ADMITTED YET";
+                } else {
+                    candidateData.status = mData.stat;
                 }
             }
         }
