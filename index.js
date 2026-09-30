@@ -64,7 +64,8 @@ app.post('/check-jamb', async (req, res) => {
             return res.json({ success: false, message: "Invalid Email or Password. Please check your credentials." });
         }
 
-        await new Promise(r => setTimeout(r, 4000));
+        // Wait for dashboard cards to fully load and render via AJAX
+        await new Promise(r => setTimeout(r, 6000));
 
         // 2. Extract Candidate Name and Profile Code from dashboard
         let candidateData = await page.evaluate(() => {
@@ -83,32 +84,44 @@ app.post('/check-jamb', async (req, res) => {
                 institution: null, 
                 course: null, 
                 status: null,
-                diagnosticReason: "Navigation to Admission tile failed."
+                diagnosticReason: "Dashboard grid tile click failed."
             };
         });
 
-        // 3. SMART NAVIGATION: Click the "Admission" / "CAPS" card tile directly on the dashboard
+        // 3. SMART NAVIGATION: Scroll down and click the "Check Admission Status" dashboard card
         try {
-            await page.evaluate(() => {
-                const els = Array.from(document.querySelectorAll('a, button, div, span, h4, p, li, .card'));
-                let target = els.find(el => {
+            await page.evaluate(async () => {
+                // Scroll down to load all grid cards
+                window.scrollTo(0, 500);
+                await new Promise(resolve => setTimeout(resolve, 2000));
+
+                const elements = Array.from(document.querySelectorAll('a, button, div, span, h4, p, li, .card, .panel'));
+                let target = elements.find(el => {
                     const txt = el.innerText.trim().toLowerCase();
-                    return txt.includes('admission') || txt.includes('caps') || txt.includes('check admission status');
+                    return txt.includes('check admission status') || txt.includes('admission status') || txt === 'caps';
                 });
+                
                 if (target) {
                     target.click();
+                } else {
+                    // Fallback search across all clickable links
+                    let linkTarget = elements.find(el => {
+                        const href = el.getAttribute('href') || '';
+                        return href.toLowerCase().includes('admission') || href.toLowerCase().includes('caps');
+                    });
+                    if (linkTarget) linkTarget.click();
                 }
             });
             await new Promise(r => setTimeout(r, 5000));
         } catch (e) {}
 
-        // 4. Click "Access My CAPS" or "Admission Status" on the sub-page
+        // 4. Click "Access My CAPS" if it appears on the sub-page
         try {
             await page.evaluate(() => {
                 const els = Array.from(document.querySelectorAll('a, button, div, span, h4, p, li'));
                 const target = els.find(el => {
                     const txt = el.innerText.trim().toLowerCase();
-                    return txt.includes('access my caps') || txt.includes('admission status') || txt.includes('utme / de');
+                    return txt.includes('access my caps');
                 });
                 if (target) target.click();
             });
@@ -119,7 +132,7 @@ app.post('/check-jamb', async (req, res) => {
         const pages = await browser.pages();
         const activePage = pages[pages.length - 1]; 
 
-        // 6. Click the "UTME / DE" Admission Offer link on CAPS if present
+        // 6. Click the "UTME / DE" Admission Offer link on CAPS
         try {
             await activePage.evaluate(() => {
                 const links = Array.from(document.querySelectorAll('a, div, span, button'));
@@ -162,22 +175,22 @@ app.post('/check-jamb', async (req, res) => {
             const crs = getElemText('ctl00_MainContent_lblprogramname');
             const stat = getElemText('ctl00_MainContent_lblAdmissionStatus');
 
-            let visibleLinks = [];
+            let visibleElements = [];
             if (!inst) {
-                const links = document.querySelectorAll('a, span, div, h3, h4');
-                links.forEach(l => {
+                const items = document.querySelectorAll('a, span, div, h3, h4, th');
+                items.forEach(l => {
                     const t = l.innerText.trim();
-                    if (t.length > 2 && t.length < 40 && !visibleLinks.includes(t)) {
-                        visibleLinks.push(t);
+                    if (t.length > 2 && t.length < 50 && !visibleElements.includes(t)) {
+                        visibleElements.push(t);
                     }
                 });
             }
 
-            return { inst, crs, stat, visibleLinks: visibleLinks.slice(0, 10) };
+            return { inst, crs, stat, visibleElements: visibleElements.slice(0, 12) };
         };
 
         let capsFound = false;
-        let diagnosticDetails = "Element lookup timed out after clicking Admission tile.";
+        let diagnosticDetails = "Element lookup timed out after scrolling dashboard grid.";
 
         for (const frame of activePage.frames()) {
             try {
@@ -188,8 +201,8 @@ app.post('/check-jamb', async (req, res) => {
                     candidateData.status = fData.stat;
                     capsFound = true;
                     break;
-                } else if (fData.visibleLinks && fData.visibleLinks.length > 0) {
-                    diagnosticDetails = `CAPS frame text: [${fData.visibleLinks.join(', ')}]`;
+                } else if (fData.visibleElements && fData.visibleElements.length > 0) {
+                    diagnosticDetails = `CAPS frame text: [${fData.visibleElements.join(', ')}]`;
                 }
             } catch (e) {}
         }
@@ -202,8 +215,8 @@ app.post('/check-jamb', async (req, res) => {
                     candidateData.course = mData.crs;
                     candidateData.status = mData.stat;
                     capsFound = true;
-                } else if (mData.visibleLinks && mData.visibleLinks.length > 0) {
-                    diagnosticDetails = `Active page text: [${mData.visibleLinks.join(', ')}]`;
+                } else if (mData.visibleElements && mData.visibleElements.length > 0) {
+                    diagnosticDetails = `Active page text: [${mData.visibleElements.join(', ')}]`;
                 }
             } catch (e) {}
         }
