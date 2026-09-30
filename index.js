@@ -83,48 +83,32 @@ app.post('/check-jamb', async (req, res) => {
                 institution: null, 
                 course: null, 
                 status: null,
-                diagnosticReason: "Navigation menu sequence failed."
+                diagnosticReason: "Navigation to Admission tile failed."
             };
         });
 
-        // 3. SMART NAVIGATION: Click "Services" first to open the menu, then click Admission Status
+        // 3. SMART NAVIGATION: Click the "Admission" / "CAPS" card tile directly on the dashboard
         try {
             await page.evaluate(() => {
-                const els = Array.from(document.querySelectorAll('a, button, div, span, h4, p, li'));
-                // Try clicking Admission Status directly if visible
+                const els = Array.from(document.querySelectorAll('a, button, div, span, h4, p, li, .card'));
                 let target = els.find(el => {
                     const txt = el.innerText.trim().toLowerCase();
-                    return txt.includes('check admission status') || txt.includes('admission status');
+                    return txt.includes('admission') || txt.includes('caps') || txt.includes('check admission status');
                 });
                 if (target) {
                     target.click();
-                } else {
-                    // Otherwise, click "Services" to open the dropdown menu
-                    const serviceBtn = els.find(el => el.innerText.trim().toLowerCase() === 'services');
-                    if (serviceBtn) serviceBtn.click();
                 }
-            });
-            await new Promise(r => setTimeout(r, 4000));
-
-            // Now click Admission Status from the expanded Services menu
-            await page.evaluate(() => {
-                const els = Array.from(document.querySelectorAll('a, button, div, span, h4, p, li'));
-                const target = els.find(el => {
-                    const txt = el.innerText.trim().toLowerCase();
-                    return txt.includes('check admission status') || txt.includes('admission status') || txt.includes('caps');
-                });
-                if (target) target.click();
             });
             await new Promise(r => setTimeout(r, 5000));
         } catch (e) {}
 
-        // 4. Click "Access My CAPS" if present
+        // 4. Click "Access My CAPS" or "Admission Status" on the sub-page
         try {
             await page.evaluate(() => {
                 const els = Array.from(document.querySelectorAll('a, button, div, span, h4, p, li'));
                 const target = els.find(el => {
                     const txt = el.innerText.trim().toLowerCase();
-                    return txt.includes('access my caps');
+                    return txt.includes('access my caps') || txt.includes('admission status') || txt.includes('utme / de');
                 });
                 if (target) target.click();
             });
@@ -135,7 +119,7 @@ app.post('/check-jamb', async (req, res) => {
         const pages = await browser.pages();
         const activePage = pages[pages.length - 1]; 
 
-        // 6. Click the "UTME / DE" Admission Offer link on CAPS
+        // 6. Click the "UTME / DE" Admission Offer link on CAPS if present
         try {
             await activePage.evaluate(() => {
                 const links = Array.from(document.querySelectorAll('a, div, span, button'));
@@ -167,7 +151,7 @@ app.post('/check-jamb', async (req, res) => {
             }
         }
 
-        // 8. Extract data or capture page diagnostic info if failed
+        // 8. Extract data directly by ID
         const extractData = () => {
             const getElemText = (id) => {
                 const el = document.getElementById(id);
@@ -193,7 +177,7 @@ app.post('/check-jamb', async (req, res) => {
         };
 
         let capsFound = false;
-        let diagnosticDetails = "Element lookup timed out after navigating Services.";
+        let diagnosticDetails = "Element lookup timed out after clicking Admission tile.";
 
         for (const frame of activePage.frames()) {
             try {
