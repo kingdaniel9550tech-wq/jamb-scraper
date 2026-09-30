@@ -46,7 +46,7 @@ app.post('/check-jamb', async (req, res) => {
         const page = await browser.newPage();
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
 
-        // 1. Login
+        // 1. Login to JAMB e-facility
         await page.goto('https://efacility.jamb.gov.ng/', { waitUntil: 'networkidle2', timeout: 45000 });
 
         await page.waitForSelector('input#email, input#Email', { timeout: 15000 });
@@ -66,7 +66,7 @@ app.post('/check-jamb', async (req, res) => {
 
         await new Promise(r => setTimeout(r, 4000));
 
-        // 2. Candidate Info from main dashboard
+        // 2. Extract Candidate Name and Profile Code from dashboard
         let candidateData = await page.evaluate(() => {
             const bodyText = document.body.innerText || "";
             let name = "Verified Candidate";
@@ -86,7 +86,7 @@ app.post('/check-jamb', async (req, res) => {
             };
         });
 
-        // 3. Navigate to CAPS
+        // 3. Navigate to CAPS ("Check Admission Status" -> "Access My CAPS")
         try {
             await page.evaluate(() => {
                 const els = Array.from(document.querySelectorAll('a, button, div, span, h4, p'));
@@ -105,22 +105,21 @@ app.post('/check-jamb', async (req, res) => {
             await new Promise(r => setTimeout(r, 6000)); 
         } catch (e) {}
 
+        // 4. Switch to the CAPS tab
         const pages = await browser.pages();
         const activePage = pages[pages.length - 1]; 
 
+        // 5. DIRECTLY CLICK THE "UTME / DE" ADMISSION OFFER LINK (`candidateadmission.aspx`)
         try {
             await activePage.evaluate(() => {
-                const els = Array.from(document.querySelectorAll('a, button, div, span, h4, p, li'));
-                const target = els.find(el => {
-                    const txt = el.innerText.trim().toLowerCase();
-                    return txt === 'admission status' || txt === 'regular admission status';
-                });
+                const links = Array.from(document.querySelectorAll('a'));
+                const target = links.find(l => (l.href && l.href.includes('candidateadmission.aspx')) || l.innerText.trim().toLowerCase().includes('utme / de'));
                 if (target) target.click();
             });
             await new Promise(r => setTimeout(r, 8000)); 
         } catch (e) {}
 
-        // 4. DIRECT ID-BASED EXTRACTION FROM HTML DOM
+        // 6. EXACT ID EXTRACTION FROM candidateadmission.aspx
         const extractByIDs = () => {
             const getElemText = (id) => {
                 const el = document.getElementById(id);
@@ -130,7 +129,8 @@ app.post('/check-jamb', async (req, res) => {
             return {
                 inst: getElemText('ctl00_MainContent_lblinstName'),
                 crs: getElemText('ctl00_MainContent_lblprogramname'),
-                stat: getElemText('ctl00_MainContent_lblAdmissionStatus')
+                stat: getElemText('ctl00_MainContent_lblAdmissionStatus'),
+                pageTextSample: document.body.innerText.substring(0, 300) // For debugging if empty
             };
         };
 
@@ -173,6 +173,9 @@ app.post('/check-jamb', async (req, res) => {
                 } else {
                     candidateData.status = mData.stat;
                 }
+            } else if (mData.pageTextSample) {
+                // If elements are missing, let's include a snippet of what page it landed on
+                console.log("Debug Page Text:", mData.pageTextSample);
             }
         }
 
