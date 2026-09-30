@@ -83,47 +83,72 @@ app.post('/check-jamb', async (req, res) => {
                 institution: null, 
                 course: null, 
                 status: null,
-                diagnosticReason: "Navigation timed out."
+                diagnosticReason: "Navigation menu sequence failed."
             };
         });
 
-        // 3. Navigate to CAPS ("Check Admission Status" -> "Access My CAPS")
+        // 3. SMART NAVIGATION: Click "Services" first to open the menu, then click Admission Status
         try {
             await page.evaluate(() => {
-                const els = Array.from(document.querySelectorAll('a, button, div, span, h4, p'));
-                const target = els.find(el => el.innerText.trim().toLowerCase().includes('check admission status'));
+                const els = Array.from(document.querySelectorAll('a, button, div, span, h4, p, li'));
+                // Try clicking Admission Status directly if visible
+                let target = els.find(el => {
+                    const txt = el.innerText.trim().toLowerCase();
+                    return txt.includes('check admission status') || txt.includes('admission status');
+                });
+                if (target) {
+                    target.click();
+                } else {
+                    // Otherwise, click "Services" to open the dropdown menu
+                    const serviceBtn = els.find(el => el.innerText.trim().toLowerCase() === 'services');
+                    if (serviceBtn) serviceBtn.click();
+                }
+            });
+            await new Promise(r => setTimeout(r, 4000));
+
+            // Now click Admission Status from the expanded Services menu
+            await page.evaluate(() => {
+                const els = Array.from(document.querySelectorAll('a, button, div, span, h4, p, li'));
+                const target = els.find(el => {
+                    const txt = el.innerText.trim().toLowerCase();
+                    return txt.includes('check admission status') || txt.includes('admission status') || txt.includes('caps');
+                });
                 if (target) target.click();
             });
             await new Promise(r => setTimeout(r, 5000));
         } catch (e) {}
 
+        // 4. Click "Access My CAPS" if present
         try {
             await page.evaluate(() => {
-                const els = Array.from(document.querySelectorAll('a, button, div, span, h4, p'));
-                const target = els.find(el => el.innerText.trim().toLowerCase().includes('access my caps'));
+                const els = Array.from(document.querySelectorAll('a, button, div, span, h4, p, li'));
+                const target = els.find(el => {
+                    const txt = el.innerText.trim().toLowerCase();
+                    return txt.includes('access my caps');
+                });
                 if (target) target.click();
             });
-            await new Promise(r => setTimeout(r, 7000)); 
+            await new Promise(r => setTimeout(r, 6000)); 
         } catch (e) {}
 
-        // 4. Switch to the CAPS tab
+        // 5. Switch to the CAPS tab/page
         const pages = await browser.pages();
         const activePage = pages[pages.length - 1]; 
 
-        // 5. Broadened click for Admission page/link
+        // 6. Click the "UTME / DE" Admission Offer link on CAPS
         try {
             await activePage.evaluate(() => {
-                const allEls = Array.from(document.querySelectorAll('a, button, div, span, h4, p, li'));
-                const target = allEls.find(el => {
-                    const txt = el.innerText.trim().toLowerCase();
-                    const href = el.getAttribute('href') || '';
-                    return href.includes('candidateadmission') || txt.includes('utme / de') || txt.includes('admission status') || txt.includes('caps home');
+                const links = Array.from(document.querySelectorAll('a, div, span, button'));
+                const target = links.find(l => {
+                    const href = l.getAttribute('href') || '';
+                    const txt = l.innerText.trim().toLowerCase();
+                    return href.includes('candidateadmission') || txt.includes('utme / de') || txt.includes('admission status');
                 });
                 if (target) target.click();
             });
         } catch (e) {}
 
-        // 6. Extended Frame-Aware Polling (Up to 25 seconds for slow JAMB servers)
+        // 7. Extended Frame-Aware Polling (Up to 25 seconds for slow JAMB servers)
         let elementFound = false;
         let attempts = 25;
         while (attempts > 0 && !elementFound) {
@@ -142,7 +167,7 @@ app.post('/check-jamb', async (req, res) => {
             }
         }
 
-        // 7. Extract data or capture available page text for diagnostics if failed
+        // 8. Extract data or capture page diagnostic info if failed
         const extractData = () => {
             const getElemText = (id) => {
                 const el = document.getElementById(id);
@@ -153,10 +178,9 @@ app.post('/check-jamb', async (req, res) => {
             const crs = getElemText('ctl00_MainContent_lblprogramname');
             const stat = getElemText('ctl00_MainContent_lblAdmissionStatus');
 
-            // Collect available links/buttons if fields are missing to help diagnose
             let visibleLinks = [];
             if (!inst) {
-                const links = document.querySelectorAll('a, span, div');
+                const links = document.querySelectorAll('a, span, div, h3, h4');
                 links.forEach(l => {
                     const t = l.innerText.trim();
                     if (t.length > 2 && t.length < 40 && !visibleLinks.includes(t)) {
@@ -169,7 +193,7 @@ app.post('/check-jamb', async (req, res) => {
         };
 
         let capsFound = false;
-        let diagnosticDetails = "Element lookup timed out across all frames.";
+        let diagnosticDetails = "Element lookup timed out after navigating Services.";
 
         for (const frame of activePage.frames()) {
             try {
@@ -181,7 +205,7 @@ app.post('/check-jamb', async (req, res) => {
                     capsFound = true;
                     break;
                 } else if (fData.visibleLinks && fData.visibleLinks.length > 0) {
-                    diagnosticDetails = `Found page text: [${fData.visibleLinks.join(', ')}]`;
+                    diagnosticDetails = `CAPS frame text: [${fData.visibleLinks.join(', ')}]`;
                 }
             } catch (e) {}
         }
@@ -195,7 +219,7 @@ app.post('/check-jamb', async (req, res) => {
                     candidateData.status = mData.stat;
                     capsFound = true;
                 } else if (mData.visibleLinks && mData.visibleLinks.length > 0) {
-                    diagnosticDetails = `Main page text: [${mData.visibleLinks.join(', ')}]`;
+                    diagnosticDetails = `Active page text: [${mData.visibleLinks.join(', ')}]`;
                 }
             } catch (e) {}
         }
